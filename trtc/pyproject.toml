@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trtc"
+version = "0.1.0"
+description = "Compile PyTorch models to TensorRT engines: spec -> ONNX -> engine, locally or on a remote builder"
+readme = "README.md"
+requires-python = ">=3.11"
+# Intentionally empty: the client (export/submit) has no runtime deps — torch
+# is a peer dependency from the host project's lock, and TensorRT is only
+# needed on the builder.
+dependencies = []
+
+[project.optional-dependencies]
+# The builder environment: trtc + TensorRT, installed and fixed (like a nix
+# derivation). The version resolves from the workspace uv.lock — engines are
+# TensorRT-version-locked, so the builder image is pinned to one version.
+builder = ["tensorrt-cu12"]
+# `trtc launch` provisioning: the vast.ai CLI.
+launch = ["vastai"]
+
+[project.scripts]
+trtc = "trtc.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["trtc*"]

@@ -1,0 +1,19 @@
+[project]
+name = "trtc-workspace"
+version = "0.1.0"
+description = "Workspace root for trtc and its builder deployment member"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = ["trtc", "trtc-builder"]
+
+[tool.uv.sources]
+trtc = { workspace = true }
+
+# NVIDIA's index hosts REAL tensorrt wheels; pypi.org only has a wheel_stub
+# sdist that downloads them at build time — a build-time network fetch that
+# breaks hermetic image builds. Non-explicit so the transitive
+# tensorrt-cu12-libs/-bindings resolve here too.
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"

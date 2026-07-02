@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trtc-builder"
+version = "0.1.0"
+description = "Deployment package for the trtc builder image: trtc + the pinned TensorRT."
+readme = "README.md"
+requires-python = ">=3.11"
+# The builder environment is fixed and correct by construction: trtc plus the
+# TensorRT the workspace lock pins. No per-job resolution happens at runtime.
+dependencies = ["trtc[builder]"]
+
+[tool.setuptools.packages.find]
+include = ["trtc_builder*"]

@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tensorrt: ["10.13.3.9.post1", "11.1.0.106"]
+        tensorrt: ["10.13.3.9.post1", "11.1.0.106", "10.16.1.11"]
     steps:
       - uses: actions/checkout@v4
 

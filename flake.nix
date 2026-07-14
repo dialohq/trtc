@@ -265,6 +265,9 @@
             push-builder-images = pkgs.writeShellApplication {
               name = "push-builder-images";
               text = ''
+                # Host registries.conf may be v1 (GitHub runners ship one),
+                # which skopeo rejects; carry our own empty (= defaults) v2.
+                export CONTAINERS_REGISTRIES_CONF=${pkgs.writeText "registries.conf" ""}
                 creds=$1
                 registry=$2
                 ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (v: pin: let

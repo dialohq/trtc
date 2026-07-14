@@ -37,22 +37,28 @@
         # The supported TensorRT versions: NVIDIA's official tarballs (lib/ +
         # include/ in one artifact), pinned by hash. Engines are
         # TRT-version-locked, so CI builds one image per entry, tagged
-        # trt<major.minor>.
+        # trt<major.minor>. From 10.16 on the builder resource is sharded per
+        # GPU architecture; each arch listed here additionally gets a slim
+        # single-arch image, tagged trt<major.minor>-sm<arch> — it builds on
+        # that architecture family only.
         tensorrtPins = {
           "10.13" = {
             version = "10.13.3.9";
             url = "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.13.3/tars/TensorRT-10.13.3.9.Linux.x86_64-gnu.cuda-12.9.tar.gz";
             sha256 = "a40650fd51f096969db072edf216a5026e61c71157bc87f475a8549681e09d34";
+            archs = []; # monolithic builder resource; no per-arch variants
           };
           "10.16" = {
             version = "10.16.1.11";
             url = "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/10.16.1/tars/TensorRT-10.16.1.11.Linux.x86_64-gnu.cuda-12.9.tar.gz";
             sha256 = "48e64fc9231fe3aeaa18be13385b486ea7c7131dd64f09b54e5fcb051386f014";
+            archs = ["80" "86" "89" "90" "100" "120"];
           };
           "11.1" = {
             version = "11.1.0.106";
             url = "https://developer.nvidia.com/downloads/compute/machine-learning/tensorrt/11.1.0/tars/TensorRT-Enterprise-11.1.0.106-Linux-x86_64-cuda-12.9-Release-external.tar.zst";
             sha256 = "a38e9c87cb2f66b30ee03cf4ece3fc2ba94ae306afe675713991af0d30914530";
+            archs = ["80" "86" "89" "90" "100" "120"];
           };
         };
 
@@ -61,9 +67,9 @@
         # (libnvinfer_builder_resource), libcudart, and libcuda (host driver)
         # by bare soname — bake all of that into libnvinfer's RUNPATH so no
         # LD_LIBRARY_PATH is ever needed, in the image or out of it.
-        tensorrtFor = pin:
+        tensorrtFor = pin: arch:
           pkgs.stdenv.mkDerivation {
-            pname = "tensorrt";
+            pname = "tensorrt${pkgs.lib.optionalString (arch != null) "-sm${arch}"}";
             inherit (pin) version;
             src = pkgs.fetchurl {inherit (pin) url sha256;};
             nativeBuildInputs = [pkgs.zstd pkgs.patchelf]; # 11.1 ships .tar.zst; tar autodetects
@@ -79,6 +85,15 @@
               # runtime_platform WINDOWS_AMD64 cross-builds; asking for that
               # fails loudly.
               rm -f lib/*_win*
+              ${pkgs.lib.optionalString (arch != null) ''
+              # Single-arch variant: keep only this architecture's builder
+              # resource (no PTX fallback either — this image builds for
+              # sm${arch} and nothing else, and fails loudly elsewhere).
+              for f in lib/libnvinfer_builder_resource*; do
+                case "$f" in *_sm${arch}.so*) ;; *) rm -f "$f" ;; esac
+              done
+              ls lib/libnvinfer_builder_resource_sm${arch}.so* >/dev/null # arch must exist in this TensorRT
+              ''}
               cp -a lib/*.so* $out/lib/
               for lib in $out/lib/libnvinfer.so.* $out/lib/libnvonnxparser.so.*; do
                 [ -L "$lib" ] || patchelf --set-rpath \
@@ -110,11 +125,11 @@
         # trtc-server (self-contained: serving + its own build subcommand for
         # jobs) and the standalone trtc-build, linked against one pinned
         # TensorRT.
-        serverFor = pin: let
-          tensorrt = tensorrtFor pin;
+        serverFor = pin: arch: let
+          tensorrt = tensorrtFor pin arch;
         in
           pkgs.stdenv.mkDerivation {
-            pname = "trtc-server";
+            pname = "trtc-server${pkgs.lib.optionalString (arch != null) "-sm${arch}"}";
             version = "${trtcVersion}-trt${pin.version}";
             src = ./trtc-server;
             nativeBuildInputs = [pkgs.cmake];
@@ -146,13 +161,13 @@
 
         # The builder image: one binary and one TensorRT, and nothing else.
         # TRT sits in its own layer so image pushes reuse it.
-        imageFor = pin:
+        imageFor = pin: arch:
           n2c.buildImage {
             name = "trtc-builder";
             copyToRoot = [
               (pkgs.buildEnv {
                 name = "trtc-bin";
-                paths = [(serverFor pin)];
+                paths = [(serverFor pin arch)];
                 pathsToLink = ["/bin"];
               })
               fsRoot
@@ -169,7 +184,7 @@
                 mode = "0755";
               }
             ];
-            layers = [(n2c.buildLayer {deps = [(tensorrtFor pin) cudartLibs];})];
+            layers = [(n2c.buildLayer {deps = [(tensorrtFor pin arch) cudartLibs];})];
             config = {
               Env = [
                 "PATH=/bin"
@@ -215,7 +230,7 @@
               trap 'rm -rf "$work"' EXIT
               cp "$spec" "$work/trtc_build_spec.json"
               for f in "''${files[@]}"; do ln -s "$(realpath "$f")" "$work/$(basename "$f")"; done
-              exec ${serverFor pin}/bin/trtc-build "$work" --out "$out"
+              exec ${serverFor pin null}/bin/trtc-build "$work" --out "$out"
             '';
           };
 
@@ -258,11 +273,12 @@
               text = ''exec ${launch-env}/bin/trtc launch "$@"'';
             };
 
-            # Pushes every pinned builder image under three tags:
-            #   trt10.13                          the moving latest for that TRT line
-            #   1.0.0-trt10.13                    this trtc release
-            #   1.0.0-trt10.13-<nix image hash>   immutable, content-addressed
-            # The version list lives here in the flake, nowhere else:
+            # Pushes every pinned builder image — universal and single-arch —
+            # each under three tags:
+            #   trt10.13[-sm120]                          moving latest
+            #   1.0.0-trt10.13[-sm120]                    this trtc release
+            #   1.0.0-trt10.13[-sm120]-<nix image hash>   immutable
+            # The version and arch lists live here in the flake, nowhere else:
             #   nix run .#push-builder-images -- "user:token" ghcr.io/dialohq/trtc-builder
             push-builder-images = pkgs.writeShellApplication {
               name = "push-builder-images";
@@ -272,26 +288,37 @@
                 export CONTAINERS_REGISTRIES_CONF=${pkgs.writeText "registries.conf" ""}
                 creds=$1
                 registry=$2
-                ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (v: pin: let
-                  image = imageFor pin;
-                in ''
-                  for tag in "trt${v}" "${trtcVersion}-trt${v}" "${trtcVersion}-trt${v}-${image.imageTag}"; do
-                    ${image.copyTo}/bin/copy-to --dest-creds "$creds" "docker://$registry:$tag"
-                    echo "pushed $registry:$tag"
-                  done
-                '')
-                tensorrtPins)}
+                ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.flatten (pkgs.lib.mapAttrsToList (
+                  v: pin:
+                    map (arch: let
+                      image = imageFor pin arch;
+                      base = "trt${v}${pkgs.lib.optionalString (arch != null) "-sm${arch}"}";
+                    in ''
+                      for tag in "${base}" "${trtcVersion}-${base}" "${trtcVersion}-${base}-${image.imageTag}"; do
+                        ${image.copyTo}/bin/copy-to --dest-creds "$creds" "docker://$registry:$tag"
+                        echo "pushed $registry:$tag"
+                      done
+                    '') ([null] ++ pin.archs)
+                )
+                tensorrtPins))}
               '';
             };
           }
           # trtc-server-trt10-13 (binaries) and trtc-builder-trt10-13 (image)
           # per supported TensorRT version.
-          // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-server-trt" v) (serverFor pin))
+          // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-server-trt" v) (serverFor pin null))
           tensorrtPins
-          // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-builder-trt" v) (imageFor pin))
+          // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-builder-trt" v) (imageFor pin null))
           tensorrtPins
           // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair "build-${v}" (buildAppFor pin))
-          tensorrtPins;
+          tensorrtPins
+          # Single-arch images: trtc-builder-trt11-1-sm120 etc.
+          // builtins.listToAttrs (pkgs.lib.flatten (pkgs.lib.mapAttrsToList (
+            v: pin:
+              map (arch: pkgs.lib.nameValuePair (attrName "trtc-builder-trt" v + "-sm${arch}") (imageFor pin arch))
+              pin.archs
+          )
+          tensorrtPins));
 
         # `nix run .#build-10.13` unquoted: nix splits attrpaths on dots, so
         # mirror the build apps as nested attrs (build-10.13 -> build-10 . 13).

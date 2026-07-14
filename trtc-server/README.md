@@ -151,8 +151,13 @@ docker run --gpus all -p 8080:8080 -v trtc-data:/data \
 
 Tags per supported TensorRT: `trt10.13` (moving latest for the line),
 `1.0.0-trt10.13` (this trtc release), `1.0.0-trt10.13-<nix hash>`
-(immutable, content-addressed). `nix run .#push-builder-images` builds and
-pushes all of them; CI runs it on main.
+(immutable, content-addressed). TensorRT ≥10.16 shards its builder resource
+per GPU architecture, so those versions also publish **single-arch images** —
+`trt11.1-sm120` (~700MB vs ~2.5GB universal) with the same three tag forms.
+A single-arch image builds on that architecture family only and fails
+loudly elsewhere; the arch list lives on each `tensorrtPins` entry.
+`nix run .#push-builder-images` builds and pushes everything; CI runs it on
+main.
 
 ## Adding a TensorRT version
 

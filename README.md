@@ -26,6 +26,8 @@ in the image, ~2GB. CI publishes one image per supported TensorRT version
 - `trt10.13` — the moving latest for that TensorRT line
 - `1.0.0-trt10.13` — this trtc release
 - `1.0.0-trt10.13-<nix hash>` — immutable, content-addressed
+- `trt11.1-sm120` (TRT ≥10.16) — single-GPU-architecture, ~700MB instead of
+  ~2.5GB; builds for that arch family only (same three tag forms)
 
 The supported version list is the `tensorrtPins` attrset in
 [`flake.nix`](flake.nix) — nowhere else. One-shot local builds on a GPU box

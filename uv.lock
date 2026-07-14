@@ -9,7 +9,6 @@ resolution-markers = [
 [manifest]
 members = [
     "trtc",
-    "trtc-builder",
     "trtc-workspace",
 ]
 
@@ -1310,69 +1309,18 @@ wheels = [
 ]
 
 [[package]]
-name = "tensorrt-cu12"
-version = "11.1.0.106"
-source = { registry = "https://pypi.nvidia.com/" }
-dependencies = [
-    { name = "tensorrt-cu12-bindings" },
-    { name = "tensorrt-cu12-libs" },
-]
-sdist = { url = "https://pypi.nvidia.com/tensorrt-cu12/tensorrt_cu12-11.1.0.106.tar.gz", hash = "sha256:3d5daa5670a4c11b2d5485914399358021a0e2cd77151fcdfe8718a752bedac5" }
-
-[[package]]
-name = "tensorrt-cu12-bindings"
-version = "11.1.0.106"
-source = { registry = "https://pypi.nvidia.com/" }
-wheels = [
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp311-none-manylinux_2_28_x86_64.whl", hash = "sha256:3b159ad98bb62d738e11615da6afab09f11a2fb762b53336782a1893e9983615" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp311-none-win_amd64.whl", hash = "sha256:a6afa53f5dce5e6f9feb08ede4c795844ebdb1ec08e52188e998213248502e03" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp312-none-manylinux_2_28_x86_64.whl", hash = "sha256:ac34b26bd056ca50e698b69b6e908ba2f6650e07bbbbd2fcfed771978c6fe67c" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp312-none-win_amd64.whl", hash = "sha256:990fb0d09d3e430a9770cd86704771f69aafb222040a929aaa6b5e883fbb8efe" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp313-none-manylinux_2_28_x86_64.whl", hash = "sha256:fd82a9e43b4e8db4a57f6f69caee7e661f8a0185181f8e9585c98e30e13e8a11" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp313-none-win_amd64.whl", hash = "sha256:3cfb486584a9784c72ba41a19a71c6dc921c6504e50159565b97ec9208944d04" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp314-none-manylinux_2_28_x86_64.whl", hash = "sha256:2d2e4bcb46819f912eb7e21d04376b1124e5f1f948dad57100d5d7dfb714c52c" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-bindings/tensorrt_cu12_bindings-11.1.0.106-cp314-none-win_amd64.whl", hash = "sha256:fb2d2d5df030c3cb5b5af9492cece9b31e684fbdb679bc84fce4b0e5a767572d" },
-]
-
-[[package]]
-name = "tensorrt-cu12-libs"
-version = "11.1.0.106"
-source = { registry = "https://pypi.nvidia.com/" }
-wheels = [
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-11.1.0.106-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:c06f6d2526b231a94eeb4c08daf2ed58a8b948081bf50313f47262395231c5cb" },
-    { url = "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-11.1.0.106-py3-none-win_amd64.whl", hash = "sha256:40b3ffe8726b6832d94fd0f625ad263523a73b7630f2fa41e814d6a4c709a6d1" },
-]
-
-[[package]]
 name = "trtc"
 version = "0.1.0"
 source = { editable = "trtc" }
 
 [package.optional-dependencies]
-builder = [
-    { name = "tensorrt-cu12" },
-]
 launch = [
     { name = "vastai" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "tensorrt-cu12", marker = "extra == 'builder'" },
-    { name = "vastai", marker = "extra == 'launch'" },
-]
-provides-extras = ["builder", "launch"]
-
-[[package]]
-name = "trtc-builder"
-version = "0.1.0"
-source = { editable = "trtc-builder" }
-dependencies = [
-    { name = "trtc", extra = ["builder"] },
-]
-
-[package.metadata]
-requires-dist = [{ name = "trtc", extras = ["builder"], editable = "trtc" }]
+requires-dist = [{ name = "vastai", marker = "extra == 'launch'" }]
+provides-extras = ["launch"]
 
 [[package]]
 name = "trtc-workspace"

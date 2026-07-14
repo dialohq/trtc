@@ -13,15 +13,16 @@ manifest-validated engines. The package and its docs live in
 trtc = { git = "https://github.com/dialohq/trtc", subdirectory = "trtc" }
 ```
 
-Your `uv.lock` pins the exact trtc commit and your TensorRT version; trtc
-reads that lock for every version decision.
+Your `uv.lock` pins the exact trtc commit and your TensorRT version; the
+client reads that lock to pick which builder image to use.
 
 ## Builder images
 
-CI publishes one image per supported TensorRT version (engines are
+Pure C++ (see [`trtc-server/`](trtc-server/README.md)) — no Python in the
+image. CI publishes one image per supported TensorRT version (engines are
 TRT-version-locked): `ghcr.io/dialohq/trtc-builder:trt<major.minor>`. The
-supported version list is the matrix in
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+supported version list is the `tensorrtPins` attrset in
+[`flake.nix`](flake.nix) — nowhere else.
 
 Rent a GPU running the version matched to *your* project's lock:
 

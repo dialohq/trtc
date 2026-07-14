@@ -1,10 +1,9 @@
-"""trtc command line: export, build, compile (export+build), submit, serve, inspect."""
+"""trtc command line: export, compile (export + remote build), submit, launch, inspect, info."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -163,26 +162,10 @@ def _add_onnx_target_arguments(parser: argparse.ArgumentParser, *, target_option
     parser.add_argument("--trt-version", default=None, help="TensorRT pin (default: uv.lock, then installed)")
 
 
-def cmd_build(args: argparse.Namespace) -> None:
-    from .build import build_plan
-
-    work_dir, plan = _resolve_build_target(args)
-    build_plan(plan, work_dir, args.out, force=args.force, timing_cache_path=args.timing_cache)
-    print(f"engines + {MANIFEST_FILE} written to {args.out or work_dir}")
-
-
 def cmd_compile(args: argparse.Namespace) -> None:
     bundle, options = _load_bundle(args)
     out_dir = _run_export(bundle, options, args)
-
-    if args.builder:
-        plan = read_plan(out_dir)
-        _submit_plan(args.builder, plan, out_dir, out_dir, token=args.token)
-    else:
-        from .build import build_plan
-
-        build_plan(read_plan(out_dir), out_dir, force=args.force, timing_cache_path=args.timing_cache)
-
+    _submit_plan(args.builder, read_plan(out_dir), out_dir, out_dir, token=args.token)
     _finalize(bundle, out_dir)
     print(f"compiled {bundle.name}: {out_dir / MANIFEST_FILE}")
 
@@ -246,12 +229,6 @@ def cmd_launch(args: argparse.Namespace) -> None:
     print(f"export TRTC_BUILDER={url}")
 
 
-def cmd_serve(args: argparse.Namespace) -> None:
-    from .server import serve
-
-    serve(host=args.host, port=args.port)
-
-
 def cmd_inspect(args: argparse.Namespace) -> None:
     path = Path(args.path)
     if path.is_dir():
@@ -283,11 +260,6 @@ def _add_entry_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--trt-version", default=None, help="TensorRT pin (default: installed tensorrt-cu12)")
 
 
-def _add_builder_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--builder", default=None, help="Builder URL; omit to build locally")
-    parser.add_argument("--token", default=None, help="Builder auth token")
-
-
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="trtc", description="Compile PyTorch models to TensorRT engines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -296,18 +268,10 @@ def main(argv: list[str] | None = None) -> None:
     _add_entry_arguments(export_parser)
     export_parser.set_defaults(handler=cmd_export)
 
-    build_parser = subparsers.add_parser("build", help="Plan dir or bare ONNX -> engines (needs GPU + pinned TRT)")
-    _add_onnx_target_arguments(build_parser)
-    build_parser.add_argument("--out", default=None, help="Engine output directory (default: alongside input)")
-    build_parser.add_argument("--force", action="store_true", help="Rebuild even if engines exist")
-    build_parser.add_argument("--timing-cache", default=None, help="TensorRT timing cache file")
-    build_parser.set_defaults(handler=cmd_build)
-
-    compile_parser = subparsers.add_parser("compile", help="export + build (+ finalize), locally or via --builder")
+    compile_parser = subparsers.add_parser("compile", help="export + build on a builder (+ finalize)")
     _add_entry_arguments(compile_parser)
-    _add_builder_arguments(compile_parser)
-    compile_parser.add_argument("--force", action="store_true", help="Rebuild even if engines exist")
-    compile_parser.add_argument("--timing-cache", default=None, help="TensorRT timing cache file (local builds)")
+    compile_parser.add_argument("--builder", required=True, help="Builder URL (see `trtc launch`)")
+    compile_parser.add_argument("--token", default=None, help="Builder auth token")
     compile_parser.set_defaults(handler=cmd_compile)
 
     submit_parser = subparsers.add_parser("submit", help="Send a plan dir or bare ONNX to a builder")
@@ -318,11 +282,6 @@ def main(argv: list[str] | None = None) -> None:
     submit_parser.add_argument("--output-url", default=None, help="Presigned PUT URL the builder uploads engines to")
     submit_parser.add_argument("--out", default=None, help="Download engines here when no --output-url is set")
     submit_parser.set_defaults(handler=cmd_submit)
-
-    serve_parser = subparsers.add_parser("serve", help="Run the builder server (see trtc/server.py for env vars)")
-    serve_parser.add_argument("--host", default="0.0.0.0")
-    serve_parser.add_argument("--port", type=int, default=8080)
-    serve_parser.set_defaults(handler=cmd_serve)
 
     launch_parser = subparsers.add_parser(
         "launch", help="Rent a vast.ai GPU and start a builder (needs the 'launch' extra: trtc[launch])"

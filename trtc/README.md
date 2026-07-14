@@ -35,18 +35,20 @@ No bundle, no plan file — point build or submit at it:
 ```sh
 uv run trtc submit model.onnx --builder http://builder:8080 --out . \
     --shape input=1x80:8x80:16x80        # min:opt:max per dynamic input
-uv run trtc build model.onnx             # same thing, locally on a GPU box
 ```
 
 ## The builder
 
-`ghcr.io/dialohq/trtc-builder` — built by CI from the flake
-(`nix build .#trtc-builder`, x2container). It is a **fixed, correct
-environment**: trtc plus the exact TensorRT the workspace `uv.lock` pins, and
-nothing resolved at runtime. Like a nix derivation, the image is pinned to one
-TensorRT version; a plan pinning a different version fails the job loudly (you
-run a builder image built for that version instead). No `uv run --with`, no
-PATH tricks — the venv is either correct or the build fails.
+`ghcr.io/dialohq/trtc-builder` — **pure C++, no Python in the image**: the
+HTTP broker (`trtc-server`) and the build tool (`trtc-build`), linked against
+one TensorRT from NVIDIA's official tarball, hash-pinned in `flake.nix` (the
+`tensorrtPins` attrset is the single list of supported versions). See
+[`trtc-server/`](../trtc-server/README.md). Like a nix derivation, the image
+is pinned to one TensorRT version; a plan pinning a different version fails
+the job loudly (you run a builder image built for that version instead).
+Building locally on a GPU box without the image is
+`nix run .#trtc-server-trt10-13 -- ...` territory — the same `trtc-build`
+binary the image ships.
 
 ### Launch one on vast.ai
 

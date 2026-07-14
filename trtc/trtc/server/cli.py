@@ -1,31 +1,26 @@
 """`trtc-server` — the builder CLI: build engines, run the build server.
 
 Runs in an environment with the pinned TensorRT installed (the builder image,
-or any GPU box). Never imports torch or model code.
+or any GPU box). Never imports torch or model code. All build options live in
+trtc_build_spec.json next to the ONNX (see trtc.buildspec) — the CLI only
+says where things are.
 """
 
 from __future__ import annotations
 
 import argparse
 
-from ..plan import MANIFEST_FILE, resolve_build_target, resolve_tensorrt_version
+from ..buildspec import MANIFEST_FILE, resolve_build_target
 
 
 def cmd_build(args: argparse.Namespace) -> None:
-    from .build import build_plan
+    from .build import build_spec
 
     try:
-        work_dir, plan = resolve_build_target(
-            args.target,
-            tensorrt_version=resolve_tensorrt_version(args.trt_version),
-            name=args.name,
-            dtype=args.dtype,
-            workspace_gb=args.workspace_gb,
-            shapes=args.shape or [],
-        )
+        work_dir, spec = resolve_build_target(args.target)
     except (ValueError, FileNotFoundError) as error:
         raise SystemExit(str(error)) from error
-    build_plan(plan, work_dir, args.out, force=args.force, timing_cache_path=args.timing_cache)
+    build_spec(spec, work_dir, args.out, force=args.force, timing_cache_path=args.timing_cache)
     print(f"engines + {MANIFEST_FILE} written to {args.out or work_dir}")
 
 
@@ -36,21 +31,17 @@ def cmd_serve(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="trtc-server", description="Build TensorRT engines from trtc plans.")
+    parser = argparse.ArgumentParser(prog="trtc-server", description="Build TensorRT engines from trtc build specs.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    build_parser = subparsers.add_parser("build", help="Plan dir or bare ONNX -> engines (needs GPU + pinned TRT)")
-    build_parser.add_argument("target", help="Plan directory (from `trtc export`) or a bare .onnx file")
-    build_parser.add_argument(
-        "--shape",
-        action="append",
-        metavar="NAME=MIN:OPT:MAX",
-        help="Bare-ONNX: optimization profile per dynamic input, e.g. x=1x80:8x80:16x80 (repeatable)",
+    build_parser = subparsers.add_parser(
+        "build", help="Spec dir or bare ONNX -> engines (needs GPU + pinned TRT)"
     )
-    build_parser.add_argument("--name", default=None, help="Bare-ONNX: component name (default: file stem)")
-    build_parser.add_argument("--dtype", choices=["float16", "float32"], default="float32", help="Bare-ONNX only")
-    build_parser.add_argument("--workspace-gb", type=float, default=4.0, help="Bare-ONNX only")
-    build_parser.add_argument("--trt-version", default=None, help="TensorRT pin (default: uv.lock, then installed)")
+    build_parser.add_argument(
+        "target",
+        help="Directory containing trtc_build_spec.json, or a bare .onnx "
+        "(uses the spec next to it, or defaults if there is none)",
+    )
     build_parser.add_argument("--out", default=None, help="Engine output directory (default: alongside input)")
     build_parser.add_argument("--force", action="store_true", help="Rebuild even if engines exist")
     build_parser.add_argument("--timing-cache", default=None, help="TensorRT timing cache file")

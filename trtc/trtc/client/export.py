@@ -1,7 +1,7 @@
-"""Export stage: bundle declaration -> ONNX files + plan.json.
+"""Export stage: bundle declaration -> ONNX files + trtc_build_spec.json.
 
 Runs where the model code lives, with the project's own torch. This is the
-only stage that imports the model; the ONNX+plan directory it produces is
+only stage that imports the model; the ONNX+spec directory it produces is
 self-contained build input for any builder.
 """
 
@@ -11,7 +11,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-from ..plan import PLAN_FILE, component_record, make_plan, sha256_file, write_json
+from ..buildspec import BuildSpec, ComponentSpec, sha256_file, write_build_spec
 from ..spec import Bundle, Component
 
 
@@ -82,9 +82,8 @@ def export_bundle(
     out_dir: str | Path,
     *,
     device: str = "cuda",
-    tensorrt_version: str,
     provenance: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> BuildSpec:
     import torch
 
     out_dir = Path(out_dir)
@@ -95,13 +94,13 @@ def export_bundle(
         print(f"export {component.name} -> {out_dir / component.onnx_name}")
         onnx_path = export_component(component, out_dir, device=device)
         components.append(
-            component_record(
+            ComponentSpec(
                 name=component.name,
                 onnx=component.onnx_name,
                 engine=component.engine_name,
                 dtype=component.dtype,
                 opset=component.opset,
-                workspace_gb=component.workspace_gb,
+                builder_config=component.builder_config,
                 strongly_typed=component.strongly_typed,
                 profiles=component.profiles(),
                 onnx_sha256=sha256_file(onnx_path),
@@ -109,13 +108,12 @@ def export_bundle(
             )
         )
 
-    plan = make_plan(
+    spec = BuildSpec(
         bundle=bundle.name,
-        tensorrt_version=tensorrt_version,
         components=components,
         engine_dir_hint=bundle.engine_dir_hint,
         meta=bundle.meta,
         provenance={"torch_version": torch.__version__, **(provenance or {})},
     )
-    write_json(out_dir / PLAN_FILE, plan)
-    return plan
+    write_build_spec(spec, out_dir)
+    return spec

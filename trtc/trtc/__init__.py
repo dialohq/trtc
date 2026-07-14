@@ -5,13 +5,18 @@ Declare a Bundle once per model; export (torch -> ONNX + plan), build
 engine runners) are all derived from it.
 """
 
+from .buildspec import BuilderConfig, BuildSpec, ComponentSpec, ShapeRange
 from .spec import AffineAxis, Axis, Bundle, Component, T, TensorSpec, load_entry
 
 __all__ = [
     "AffineAxis",
     "Axis",
+    "BuildSpec",
+    "BuilderConfig",
     "Bundle",
     "Component",
+    "ComponentSpec",
+    "ShapeRange",
     "T",
     "TensorSpec",
     "load_entry",

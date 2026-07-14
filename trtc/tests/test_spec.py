@@ -46,17 +46,19 @@ class AxisTests(unittest.TestCase):
 
 class ComponentTests(unittest.TestCase):
     def test_profiles_match_legacy_decoder_profile_shapes(self):
+        from trtc.buildspec import ShapeRange
+
         # Exact output of the deleted decoder_dynamic_profile_shapes(min_batch=1,
         # opt_batch=8, max_batch=16, min_asr_frames=128, opt_asr_frames=256,
         # max_asr_frames=1024) — the bundle declaration must reproduce it.
         expected = {
-            "asr": {"min": [1, 512, 128], "opt": [8, 512, 256], "max": [16, 512, 1024]},
-            "f0": {"min": [1, 256], "opt": [8, 512], "max": [16, 2048]},
-            "noise": {"min": [1, 256], "opt": [8, 512], "max": [16, 2048]},
-            "style": {"min": [1, 128], "opt": [8, 128], "max": [16, 128]},
-            "har": {"min": [1, 22, 15361], "opt": [8, 22, 30721], "max": [16, 22, 122881]},
+            "asr": ShapeRange(min=[1, 512, 128], opt=[8, 512, 256], max=[16, 512, 1024]),
+            "f0": ShapeRange(min=[1, 256], opt=[8, 512], max=[16, 2048]),
+            "noise": ShapeRange(min=[1, 256], opt=[8, 512], max=[16, 2048]),
+            "style": ShapeRange(min=[1, 128], opt=[8, 128], max=[16, 128]),
+            "har": ShapeRange(min=[1, 22, 15361], opt=[8, 22, 30721], max=[16, 22, 122881]),
         }
-        self.assertEqual(_styletts2_decoder_component().profiles(), expected)
+        self.assertEqual(_styletts2_decoder_component().profiles(), [expected])
 
     def test_dynamic_axes_cover_inputs_and_outputs(self):
         axes = _styletts2_decoder_component().dynamic_axes()

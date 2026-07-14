@@ -1,18 +1,21 @@
 """The builder: a deliberately dumb HTTP job broker on GPU hardware.
 
-One job = one ONNX + build parameters in the query string = one engine back.
-The server knows nothing about models, bundles, or plans — multi-component
-compilation is N jobs, composed client-side. Each job runs `trtc-server build` in
-this server's own interpreter, which is expected to be a correct, fixed
+One job = one tar (trtc_build_spec.json + the single ONNX it references,
+side by side, exactly the on-disk layout) = one engine back. All build
+options live in the spec; the request carries no build parameters. The
+server knows nothing about models or bundles — multi-component compilation
+is N jobs, composed client-side. Each job runs `trtc-server build` in this
+server's own interpreter, which is expected to be a correct, fixed
 environment (trtc + the pinned tensorrt already installed, like a nix
-derivation). There is no per-job dependency resolution: a plan pinning a
-TensorRT this environment does not provide fails the job loudly, and you run a
-builder image built for that version instead. Engine and timing caches persist
-under TRTC_DATA_DIR, so a stopped-and-resumed instance stays warm.
+derivation). There is no per-job dependency resolution: a spec pinning a
+TensorRT this environment does not provide fails the job loudly, and you run
+a builder image built for that version instead. Engine and timing caches
+persist under TRTC_DATA_DIR, so a stopped-and-resumed instance stays warm.
 
 API (bearer auth when TRTC_TOKEN is set):
-  POST /builds?trt=<ver>[&name=][&dtype=][&workspace_gb=][&shape=NAME=MIN:OPT:MAX]*[&output_url=]
-       body: raw ONNX bytes, or JSON {"input_url": ...} pointing at them
+  POST /builds[?output_url=<presigned PUT for the engine>]
+       body: a job tar (trtc_build_spec.json + ONNX), or JSON
+       {"input_url": ...} pointing at one
   GET  /builds/{id}[?log_offset=N]   status + log; "result" holds the build
        facts (single-component manifest) once succeeded
   GET  /builds/{id}/artifacts        the engine, as raw bytes
@@ -29,7 +32,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import re
 import subprocess
 import sys
 import threading
@@ -41,7 +43,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ..plan import MANIFEST_FILE, query_gpu, read_json, write_json
+from ..buildspec import MANIFEST_FILE, extract_job_tar, installed_tensorrt_version, query_gpu, read_json, write_json
 
 
 class BuilderState:
@@ -76,74 +78,45 @@ class BuilderState:
             return status
 
 
-_SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-
-
-def _safe_name(name: str) -> str:
-    """A component name becomes filesystem paths on the builder, so reject
-    anything that isn't a single innocuous path segment (no separators, no
-    '..', no leading dot) to prevent traversal."""
-    if not _SAFE_NAME.match(name) or ".." in name:
-        raise ValueError(f"invalid name {name!r}: expected [A-Za-z0-9._-], no separators or '..'")
-    return name
-
-
-def parse_build_params(query: dict[str, list[str]]) -> dict[str, Any]:
-    if not query.get("trt", [""])[0]:
-        raise ValueError("missing required query parameter: trt (the tensorrt-cu12 pin)")
-    return {
-        "trt_version": query["trt"][0],
-        "name": _safe_name(query.get("name", ["model"])[0]),
-        "dtype": query.get("dtype", ["float32"])[0],
-        "workspace_gb": float(query.get("workspace_gb", ["4"])[0]),
-        "shapes": query.get("shape", []),
-    }
-
-
-def _build_command(state: BuilderState, onnx_path: Path, output_dir: Path, params: dict[str, Any]) -> list[str]:
-    # Runs `trtc-server build` in this server's own interpreter. The builder is a
-    # correct, fixed environment (trtc + the pinned tensorrt already installed,
-    # like a nix derivation) — no per-job resolution. If the plan pins a
-    # TensorRT this environment does not provide, build._check_trt_version
-    # fails the job loudly; use a builder image built for that version instead.
-    build_args = [
-        "-m", "trtc.server.cli", "build", str(onnx_path),
-        "--name", params["name"],
-        "--dtype", params["dtype"],
-        "--workspace-gb", str(params["workspace_gb"]),
-        "--trt-version", params["trt_version"],
+def _build_command(state: BuilderState, input_dir: Path, output_dir: Path) -> list[str]:
+    # Runs `trtc-server build` on the extracted job dir in this server's own
+    # interpreter. The builder is a correct, fixed environment (trtc + one
+    # prebaked tensorrt, like a nix derivation) — the TensorRT version is not
+    # a job parameter; you run the builder image built for the version you
+    # want. The timing cache is still keyed by that version because
+    # TRTC_DATA_DIR is a volume that can outlive image upgrades.
+    trt_version = installed_tensorrt_version() or "unknown"
+    return [
+        sys.executable,
+        "-m", "trtc.server.cli", "build", str(input_dir),
         "--out", str(output_dir),
-        "--timing-cache", str(state.cache_dir / f"timing_trt{params['trt_version']}.bin"),
+        "--timing-cache", str(state.cache_dir / f"timing_trt{trt_version}.bin"),
     ]
-    for shape in params["shapes"]:
-        build_args += ["--shape", shape]
-    return [sys.executable, *build_args]
 
 
 def _engine_path(state: BuilderState, status: dict[str, Any]) -> Path:
-    return state.job_dir(status["id"]) / "engines" / f"{status['params']['name']}.engine"
+    return state.job_dir(status["id"]) / "engines" / status["spec"]["components"][0]["engine"]
 
 
 def _run_job(state: BuilderState, job_id: str) -> None:
     job_dir = state.job_dir(job_id)
+    input_dir = job_dir / "input"
     output_dir = job_dir / "engines"
     log_path = job_dir / "job.log"
     status = state.read_status(job_id) or {}
-    params = status["params"]
     with state.lock:
         state.in_flight += 1
     state.touch()
     state.write_status(job_id, state="running", started_at=time.time())
     try:
-        onnx_path = job_dir / "input" / f"{params['name']}.onnx"
         input_url = status.get("input_url")
         if input_url:
-            onnx_path.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(input_url, timeout=600) as response:
-                onnx_path.write_bytes(response.read())
+                spec = extract_job_tar(response.read(), input_dir)
+            status = state.write_status(job_id, spec=spec.to_dict())
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        command = _build_command(state, onnx_path, output_dir, params)
+        command = _build_command(state, input_dir, output_dir)
 
         environment = {**os.environ, "TRTC_CACHE_DIR": str(state.cache_dir)}
         with open(log_path, "ab") as log_handle:
@@ -224,7 +197,13 @@ def make_handler(state: BuilderState, token: str | None) -> type[BaseHTTPRequest
                 jobs = sum(1 for path in state.jobs_dir.iterdir() if path.is_dir())
                 self._send_json(
                     200,
-                    {**query_gpu(), "trtc": _trtc_version(), "jobs": jobs, "cache_dir": str(state.cache_dir)},
+                    {
+                        **query_gpu(),
+                        "trtc": _trtc_version(),
+                        "tensorrt": installed_tensorrt_version(),
+                        "jobs": jobs,
+                        "cache_dir": str(state.cache_dir),
+                    },
                 )
                 return
 
@@ -235,8 +214,8 @@ def make_handler(state: BuilderState, token: str | None) -> type[BaseHTTPRequest
                     self._send_json(404, {"error": f"unknown job {job_id}"})
                     return
                 if len(parts) == 3 and parts[2] == "artifacts":
-                    engine_path = _engine_path(state, status)
-                    if status.get("state") != "succeeded" or not engine_path.exists():
+                    engine_path = _engine_path(state, status) if status.get("spec") else None
+                    if status.get("state") != "succeeded" or engine_path is None or not engine_path.exists():
                         self._send_json(409, {"error": f"job {job_id} has no engine (state={status.get('state')})"})
                         return
                     self._send(200, engine_path.read_bytes(), content_type="application/octet-stream")
@@ -269,32 +248,29 @@ def make_handler(state: BuilderState, token: str | None) -> type[BaseHTTPRequest
             content_length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(content_length) if content_length else b""
 
+            job_id = uuid.uuid4().hex[:12]
+            status: dict[str, Any] = {
+                "state": "queued",
+                "created_at": time.time(),
+                "output_url": query.get("output_url", [None])[0],
+            }
             try:
-                params = parse_build_params(query)
-                status: dict[str, Any] = {
-                    "state": "queued",
-                    "created_at": time.time(),
-                    "params": params,
-                    "output_url": query.get("output_url", [None])[0],
-                }
                 if self.headers.get("Content-Type", "").startswith("application/json"):
                     job_request = json.loads(body)
                     if not job_request.get("input_url"):
                         raise ValueError("JSON submissions require input_url")
                     status["input_url"] = job_request["input_url"]
                 elif body:
-                    pass  # raw ONNX bytes; written below once the job dir exists
+                    # A job tar: validated and unpacked now, so malformed
+                    # submissions fail the request instead of the job.
+                    spec = extract_job_tar(body, state.job_dir(job_id) / "input")
+                    status["spec"] = spec.to_dict()
                 else:
-                    raise ValueError("empty body: send raw ONNX bytes or JSON with input_url")
+                    raise ValueError("empty body: send a job tar or JSON with input_url")
             except (ValueError, json.JSONDecodeError) as error:
                 self._send_json(400, {"error": str(error)})
                 return
 
-            job_id = uuid.uuid4().hex[:12]
-            if "input_url" not in status:
-                onnx_path = state.job_dir(job_id) / "input" / f"{params['name']}.onnx"
-                onnx_path.parent.mkdir(parents=True, exist_ok=True)
-                onnx_path.write_bytes(body)
             state.write_status(job_id, **status)
             state.queue.put(job_id)
             self._send_json(202, {"id": job_id, "state": "queued"})

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Mapping, Sequence
 
+from .buildspec import BuilderConfig, Profile, ShapeRange
+
 PROFILE_KINDS = ("min", "opt", "max")
 
 
@@ -102,8 +104,11 @@ class Component:
     file_stem: str | None = None
     dtype: str = "float32"
     opset: int = 20
-    workspace_gb: float = 4.0
     strongly_typed: bool = True
+    # tensorrt.IBuilderConfig options for the build stage, 1:1 with the
+    # TensorRT Python API, e.g. BuilderConfig(flags=["FP16"],
+    # builder_optimization_level=4, memory_pool_limits={"WORKSPACE": "8G"}).
+    builder_config: BuilderConfig = field(default_factory=BuilderConfig)
     # Extra dynamic-axis names for outputs, e.g. {"audio": {0: "batch", 2: "audio_samples"}}
     output_axes: Mapping[str, Mapping[int, str]] | None = None
     # Context manager entered around torch.onnx.export (model-owned graph
@@ -123,11 +128,17 @@ class Component:
     def engine_name(self) -> str:
         return f"{self.stem}.engine"
 
-    def profiles(self) -> dict[str, dict[str, list[int]]]:
-        return {
-            tensor_name: {kind: list(ts.shape(kind)) for kind in PROFILE_KINDS}
-            for tensor_name, ts in self.inputs.items()
-        }
+    def profiles(self) -> list[Profile]:
+        """The component's optimization profiles: one profile derived from the
+        declared axes, covering every input."""
+        return [
+            {
+                tensor_name: ShapeRange(
+                    **{kind: list(ts.shape(kind)) for kind in PROFILE_KINDS}
+                )
+                for tensor_name, ts in self.inputs.items()
+            }
+        ]
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         axes: dict[str, dict[int, str]] = {}

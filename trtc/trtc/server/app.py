@@ -95,7 +95,8 @@ def _build_command(state: BuilderState, input_dir: Path, output_dir: Path) -> li
 
 
 def _engine_path(state: BuilderState, status: dict[str, Any]) -> Path:
-    return state.job_dir(status["id"]) / "engines" / status["spec"]["components"][0]["engine"]
+    onnx = status["spec"]["components"][0]["onnx"]
+    return state.job_dir(status["id"]) / "engines" / f"{Path(onnx).stem}.engine"
 
 
 def _run_job(state: BuilderState, job_id: str) -> None:

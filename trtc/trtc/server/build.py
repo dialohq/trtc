@@ -33,12 +33,19 @@ def _installed_trt_version(trt: Any) -> str:
 
 
 def _engine_cache_key(
-    component: ComponentSpec, onnx_sha256: str, trt_version: str, compute_capability: str | None
+    component: ComponentSpec,
+    file_hashes: dict[str, str],
+    trt_version: str,
+    compute_capability: str | None,
 ) -> str:
+    """file_hashes: actual sha256 of the ONNX and each external data file —
+    the verified content, not whatever the spec declared."""
     identity = json.dumps(
         {
-            "onnx": onnx_sha256,
-            "component": {k: v for k, v in component.to_dict().items() if k not in ("onnx_sha256", "meta")},
+            "files": file_hashes,
+            "component": {
+                k: v for k, v in component.to_dict().items() if k not in ("onnx_sha256", "external_data", "meta")
+            },
             "trt": trt_version,
             "cc": compute_capability,
         },
@@ -117,7 +124,10 @@ def _build_engine(
     network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) if component.strongly_typed else 0
     network = builder.create_network(network_flags)
     parser = trt.OnnxParser(network, logger)
-    if not parser.parse(onnx_path.read_bytes()):
+    # parse_from_file, not parse(bytes): large models keep their weights in
+    # external data files next to the ONNX, which the parser resolves
+    # relative to the model's path.
+    if not parser.parse_from_file(str(onnx_path)):
         errors = "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"TensorRT failed to parse {onnx_path}:\n{errors}")
 
@@ -174,16 +184,21 @@ def build_spec(
     for component in spec.components:
         onnx_path = work_dir / component.onnx
         engine_path = out_dir / component.engine
-        if not onnx_path.exists():
-            raise FileNotFoundError(f"Spec references missing ONNX file: {onnx_path}")
-        onnx_sha256 = sha256_file(onnx_path)
-        if component.onnx_sha256 and component.onnx_sha256 != onnx_sha256:
-            raise RuntimeError(
-                f"{onnx_path} does not match the spec: sha256 {onnx_sha256}, spec says {component.onnx_sha256}. "
-                "Re-export or fix the spec."
-            )
+        declared = {component.onnx: component.onnx_sha256, **component.external_data}
+        file_hashes: dict[str, str] = {}
+        for file_name, declared_sha in declared.items():
+            file_path = work_dir / file_name
+            if not file_path.exists():
+                raise FileNotFoundError(f"Spec references missing file: {file_path}")
+            actual_sha = sha256_file(file_path)
+            if declared_sha and declared_sha != actual_sha:
+                raise RuntimeError(
+                    f"{file_path} does not match the spec: sha256 {actual_sha}, spec says {declared_sha}. "
+                    "Re-export or fix the spec."
+                )
+            file_hashes[file_name] = actual_sha
 
-        cache_key = _engine_cache_key(component, onnx_sha256, trt_version, gpu["compute_capability"])
+        cache_key = _engine_cache_key(component, file_hashes, trt_version, gpu["compute_capability"])
         cached_engine = (engine_cache_dir / "engines" / f"{cache_key}.engine") if engine_cache_dir else None
         # Sidecar recording which cache key produced the engine at engine_path,
         # so an existing engine is only reused when it matches THIS spec (same
@@ -209,14 +224,16 @@ def build_spec(
             if cached_engine is not None:
                 shutil.copyfile(engine_path, cached_engine)
 
-        built_components.append(
-            {
-                **component.to_dict(),
-                "onnx_sha256": onnx_sha256,
-                "engine_sha256": sha256_file(engine_path),
-                "engine_size": engine_path.stat().st_size,
-            }
-        )
+        built = {
+            **component.to_dict(),
+            "onnx_sha256": file_hashes[component.onnx],
+            "engine": component.engine,
+            "engine_sha256": sha256_file(engine_path),
+            "engine_size": engine_path.stat().st_size,
+        }
+        if component.external_data:
+            built["external_data"] = {name: file_hashes[name] for name in component.external_data}
+        built_components.append(built)
 
     if timing_cache is not None and timing_cache_path is not None:
         serialized_cache = timing_cache.serialize()

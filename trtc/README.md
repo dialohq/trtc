@@ -29,10 +29,8 @@ enum values spelled as member names):
 ```json
 {
   "trtc_build_spec": 1,
-  "bundle": "asr",
   "components": [
     {
-      "name": "encoder",
       "onnx": "encoder.onnx",
       "strongly_typed": true,
       "profiles": [
@@ -53,6 +51,11 @@ enum values spelled as member names):
 }
 ```
 
+That's the whole schema — a version, and per ONNX: `profiles`,
+`builder_config`, `strongly_typed`, plus optional integrity fields
+(`onnx_sha256`, `external_data`). Component and engine names derive from the
+ONNX file name; there is no other metadata.
+
 Each entry of `profiles` is one whole optimization profile covering every
 dynamic input; list several to build a multi-profile engine. `builder_config`
 keys are `IBuilderConfig` attributes — anything TensorRT exposes as data
@@ -61,6 +64,20 @@ and unknown flag/pool/enum names fail the build loudly with the list of names
 the builder's TensorRT actually has. Unset means TensorRT's own default.
 Options that are live Python objects (`int8_calibrator`, `algorithm_selector`,
 `profile_stream`) are not data and cannot appear in a spec.
+
+### Large models (external weight data)
+
+Models over 2GB can't keep their weights inside the ONNX protobuf — they ship
+as `model.onnx` plus external data files next to it. A component lists those
+files under `external_data` (file name → sha256, or `null` to skip
+verification); they travel with the ONNX in every job tar, and the builder
+parses the model from disk so TensorRT resolves them. `trtc export` detects
+the files torch writes and fills this in automatically; a bare
+`model.onnx` with a sibling `model.onnx.data` is picked up by convention.
+
+```json
+{"onnx": "big.onnx", "external_data": {"big.onnx.data": null}}
+```
 
 The same shapes exist in Python as dataclasses (`trtc.BuildSpec`,
 `trtc.ComponentSpec`, `trtc.BuilderConfig`, `trtc.ShapeRange`) — `trtc export`
@@ -134,13 +151,13 @@ It needs a vast.ai key (`VAST_API_KEY` or a configured `vastai`); options:
 ### The API
 
 Deliberately dumb: one job is one tar — `trtc_build_spec.json` with its ONNX
-next to it, exactly the on-disk layout — returning one engine. No build
-parameters in the request. Multi-component models are composed client-side.
-Engine + timing caches persist under `TRTC_DATA_DIR`, so any HTTP client
-works:
+(and any external weight data files) next to it, exactly the on-disk layout —
+returning one engine. No build parameters in the request. Multi-component
+models are composed client-side. Engine + timing caches persist under
+`TRTC_DATA_DIR`, so any HTTP client works:
 
 ```sh
-tar cf job.tar trtc_build_spec.json model.onnx
+tar cf job.tar trtc_build_spec.json model.onnx model.onnx.data
 curl -X POST -H 'Content-Type: application/x-tar' \
     --data-binary @job.tar "http://builder:8080/builds"
 ```

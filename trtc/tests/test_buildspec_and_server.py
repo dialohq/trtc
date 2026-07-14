@@ -36,10 +36,8 @@ from trtc.server.build import _engine_cache_key, apply_builder_config
 
 def _spec() -> BuildSpec:
     return BuildSpec(
-        bundle="test",
         components=[
             ComponentSpec(
-                name="m",
                 onnx="m.onnx",
                 profiles=[{"x": ShapeRange(min=[1, 3], opt=[2, 3], max=[4, 3])}],
                 builder_config=BuilderConfig(flags=["FP16"], memory_pool_limits={"WORKSPACE": "1G"}),
@@ -78,7 +76,7 @@ class BuildSpecTests(unittest.TestCase):
             BuildSpec.from_dict({**data, "components": [component]})
         with self.assertRaises(ValueError):
             component = dict(data["components"][0])
-            del component["name"]
+            del component["onnx"]
             BuildSpec.from_dict({**data, "components": [component]})
 
     def test_builder_config_normalizes_names_and_sizes(self):
@@ -114,27 +112,116 @@ class BuildSpecTests(unittest.TestCase):
 
     def test_engine_cache_key_tracks_identity(self):
         component = _spec().components[0]
-        key = _engine_cache_key(component, "abc", "10.13.3.9", "8.9")
-        self.assertEqual(key, _engine_cache_key(component, "abc", "10.13.3.9", "8.9"))
-        self.assertNotEqual(key, _engine_cache_key(component, "abc", "10.13.3.9", "9.0"))
-        self.assertNotEqual(key, _engine_cache_key(component, "def", "10.13.3.9", "8.9"))
+        files = {"m.onnx": "abc"}
+        key = _engine_cache_key(component, files, "10.13.3.9", "8.9")
+        self.assertEqual(key, _engine_cache_key(component, dict(files), "10.13.3.9", "8.9"))
+        self.assertNotEqual(key, _engine_cache_key(component, files, "10.13.3.9", "9.0"))
+        self.assertNotEqual(key, _engine_cache_key(component, {"m.onnx": "def"}, "10.13.3.9", "8.9"))
+        self.assertNotEqual(key, _engine_cache_key(component, {**files, "m.onnx.data": "eee"}, "10.13.3.9", "8.9"))
         reconfigured = ComponentSpec.from_dict(
             {**component.to_dict(), "builder_config": {"builder_optimization_level": 5}}
         )
-        self.assertNotEqual(key, _engine_cache_key(reconfigured, "abc", "10.13.3.9", "8.9"))
+        self.assertNotEqual(key, _engine_cache_key(reconfigured, files, "10.13.3.9", "8.9"))
 
     def test_assemble_manifest_merges_component_results(self):
         spec = _spec()
         build_facts = {"tensorrt_version": "10.13.3.9.post1", "compute_capability": "8.9"}
         result = {
-            "components": [{"name": "m", "engine": "m.engine", "engine_sha256": "eee", "engine_size": 7}],
+            "components": [{"onnx": "m.onnx", "engine": "m.engine", "engine_sha256": "eee", "engine_size": 7}],
             "build": build_facts,
         }
         manifest = assemble_manifest(spec, [result])
         self.assertEqual(manifest["components"][0]["engine_sha256"], "eee")
         self.assertEqual(manifest["build"], build_facts)
         with self.assertRaises(ValueError):
-            assemble_manifest(spec, [{**result, "components": [{**result["components"][0], "name": "other"}]}])
+            assemble_manifest(spec, [{**result, "components": [{**result["components"][0], "onnx": "other.onnx"}]}])
+
+
+class ExternalDataTests(unittest.TestCase):
+    """Large models (>2GB) keep weights in external data files next to the
+    ONNX; those files belong to the component and travel with it."""
+
+    def _spec_with_data(self, work_dir: Path) -> BuildSpec:
+        (work_dir / "big.onnx").write_bytes(b"graph")
+        (work_dir / "big.onnx.data").write_bytes(b"many gigabytes of weights")
+        spec = BuildSpec(
+            components=[ComponentSpec(onnx="big.onnx", external_data={"big.onnx.data": None})],
+        )
+        write_build_spec(spec, work_dir)
+        return spec
+
+    def test_external_data_roundtrips_through_spec_and_tar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            self._spec_with_data(work_dir)
+            spec = read_build_spec(work_dir)
+            self.assertEqual(spec.components[0].external_data, {"big.onnx.data": None})
+
+            data = pack_job_tar(spec, work_dir)
+            dest = work_dir / "job"
+            extracted = extract_job_tar(data, dest)
+            self.assertEqual((dest / "big.onnx.data").read_bytes(), b"many gigabytes of weights")
+            self.assertEqual(extracted.components[0].external_data, {"big.onnx.data": None})
+
+    def test_pack_requires_external_files_to_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            spec = self._spec_with_data(work_dir)
+            (work_dir / "big.onnx.data").unlink()
+            with self.assertRaises(FileNotFoundError):
+                pack_job_tar(spec, work_dir)
+
+    def test_extract_requires_declared_external_files_in_tar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            spec = self._spec_with_data(work_dir)
+            data = pack_job_tar(spec, work_dir)
+            # Rebuild the tar without the data file the spec declares.
+            with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                members = {
+                    m.name: archive.extractfile(m).read() for m in archive.getmembers() if m.name != "big.onnx.data"
+                }
+            stripped = io.BytesIO()
+            with tarfile.open(fileobj=stripped, mode="w") as archive:
+                for name, payload in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(payload)
+                    archive.addfile(info, io.BytesIO(payload))
+            with self.assertRaises(ValueError):
+                extract_job_tar(stripped.getvalue(), work_dir / "job")
+
+    def test_extract_rejects_unsafe_external_names(self):
+        bad = _spec().to_dict()
+        bad["components"][0]["external_data"] = {"../evil.data": None}
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as archive:
+            for name, payload in {BUILD_SPEC_FILE: json.dumps(bad).encode(), "m.onnx": b"x"}.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                extract_job_tar(buffer.getvalue(), Path(tmp) / "job")
+
+    def test_default_spec_picks_up_sibling_data_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work_dir = Path(tmp)
+            (work_dir / "big.onnx").write_bytes(b"graph")
+            (work_dir / "big.onnx.data").write_bytes(b"weights")
+            _, spec = resolve_build_target(work_dir / "big.onnx")
+            self.assertEqual(list(spec.components[0].external_data), ["big.onnx.data"])
+            self.assertIsNotNone(spec.components[0].external_data["big.onnx.data"])  # sha filled in
+
+            (work_dir / "big.onnx.data").unlink()
+            _, spec = resolve_build_target(work_dir / "big.onnx")
+            self.assertEqual(spec.components[0].external_data, {})
+
+    def test_export_snapshot_spots_new_and_rewritten_files(self):
+        from trtc.client.export import new_files
+
+        self.assertEqual(new_files({"a": 1}, {"a": 1, "b": 2}), ["b"])
+        self.assertEqual(new_files({"a": 1}, {"a": 9}), ["a"])  # rewritten counts
+        self.assertEqual(new_files({"a": 1, "gone": 2}, {"a": 1}), [])
 
 
 class JobTarTests(unittest.TestCase):
@@ -144,7 +231,7 @@ class JobTarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work_dir = _spec_dir(Path(tmp))
             spec = read_build_spec(work_dir)
-            data = pack_job_tar(single_component_spec(spec, spec.components[0]), work_dir)
+            data = pack_job_tar(single_component_spec(spec.components[0]), work_dir)
 
             dest = Path(tmp) / "job"
             extracted = extract_job_tar(data, dest)
@@ -155,8 +242,7 @@ class JobTarTests(unittest.TestCase):
     def test_pack_requires_single_component_and_existing_onnx(self):
         spec = _spec()
         two = BuildSpec(
-            bundle="test",
-            components=[spec.components[0], ComponentSpec(name="n", onnx="n.onnx")],
+            components=[spec.components[0], ComponentSpec(onnx="n.onnx")],
         )
         with self.assertRaises(ValueError):
             pack_job_tar(two, ".")
@@ -356,7 +442,7 @@ class ServerRoundTripTests(unittest.TestCase):
     """Job tar up -> stubbed build -> engine bytes down."""
 
     RESULT = {
-        "components": [{"name": "m", "engine": "m.engine", "engine_sha256": "abc", "engine_size": 9}],
+        "components": [{"onnx": "m.onnx", "engine": "m.engine", "engine_sha256": "abc", "engine_size": 9}],
         "build": {"tensorrt_version": "10.13.3.9.post1", "compute_capability": "8.9"},
     }
 

@@ -52,6 +52,16 @@ def _module_device(module: Any, fallback: str) -> str:
         return fallback
 
 
+def _dir_snapshot(directory: Path) -> dict[str, int]:
+    """File name -> mtime_ns, for spotting what an export actually wrote."""
+    return {p.name: p.stat().st_mtime_ns for p in directory.iterdir() if p.is_file()}
+
+
+def new_files(before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """Files created or rewritten between two snapshots."""
+    return sorted(name for name, mtime in after.items() if before.get(name) != mtime)
+
+
 def export_component(component: Component, out_dir: Path, *, device: str) -> Path:
     import torch
 
@@ -82,38 +92,30 @@ def export_bundle(
     out_dir: str | Path,
     *,
     device: str = "cuda",
-    provenance: dict[str, Any] | None = None,
 ) -> BuildSpec:
-    import torch
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     components = []
     for component in bundle.components:
         print(f"export {component.name} -> {out_dir / component.onnx_name}")
+        before = _dir_snapshot(out_dir)
         onnx_path = export_component(component, out_dir, device=device)
+        # Anything else the exporter wrote is external weight data the ONNX
+        # references (models >2GB store tensors outside the protobuf); it
+        # belongs to the component and travels with it.
+        external_names = [name for name in new_files(before, _dir_snapshot(out_dir)) if name != onnx_path.name]
         components.append(
             ComponentSpec(
-                name=component.name,
                 onnx=component.onnx_name,
-                engine=component.engine_name,
-                dtype=component.dtype,
-                opset=component.opset,
                 builder_config=component.builder_config,
                 strongly_typed=component.strongly_typed,
                 profiles=component.profiles(),
                 onnx_sha256=sha256_file(onnx_path),
-                meta=component.meta,
+                external_data={name: sha256_file(out_dir / name) for name in external_names},
             )
         )
 
-    spec = BuildSpec(
-        bundle=bundle.name,
-        components=components,
-        engine_dir_hint=bundle.engine_dir_hint,
-        meta=bundle.meta,
-        provenance={"torch_version": torch.__version__, **(provenance or {})},
-    )
+    spec = BuildSpec(components=components)
     write_build_spec(spec, out_dir)
     return spec

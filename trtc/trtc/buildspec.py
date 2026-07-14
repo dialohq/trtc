@@ -149,41 +149,44 @@ class BuilderConfig:
 
 @dataclass
 class ComponentSpec:
-    """One engine to build: an ONNX file plus how to build it."""
+    """One engine to build: an ONNX file (plus any external weight data files
+    it references) and how to build it. Nothing else — names derive from the
+    ONNX file name."""
 
-    name: str
     onnx: str
-    engine: str = ""
     strongly_typed: bool = True
     profiles: list[Profile] = field(default_factory=list)
     builder_config: BuilderConfig = field(default_factory=BuilderConfig)
     # sha256 of the ONNX; export fills it in, hand-written specs may omit it.
     # When present, build refuses an ONNX that doesn't match.
     onnx_sha256: str | None = None
-    dtype: str | None = None
-    opset: int | None = None
-    meta: dict[str, Any] = field(default_factory=dict)
+    # External weight data files the ONNX references (models >2GB store
+    # tensors outside the protobuf), living next to the ONNX: file name ->
+    # sha256 (or None to skip verification). They travel with the ONNX in
+    # every job tar.
+    external_data: dict[str, str | None] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if not self.engine:
-            self.engine = f"{Path(self.onnx).stem}.engine"
+    @property
+    def name(self) -> str:
+        return Path(self.onnx).stem
+
+    @property
+    def engine(self) -> str:
+        return f"{self.name}.engine"
 
     def to_dict(self) -> dict[str, Any]:
         record: dict[str, Any] = {
-            "name": self.name,
             "onnx": self.onnx,
-            "engine": self.engine,
             "strongly_typed": self.strongly_typed,
             "profiles": [
                 {tensor: asdict(ranges) for tensor, ranges in profile.items()} for profile in self.profiles
             ],
             "builder_config": self.builder_config.to_dict(),
-            "onnx_sha256": self.onnx_sha256,
-            "dtype": self.dtype,
-            "meta": dict(self.meta),
         }
-        if self.opset is not None:
-            record["opset"] = self.opset
+        if self.onnx_sha256:
+            record["onnx_sha256"] = self.onnx_sha256
+        if self.external_data:
+            record["external_data"] = dict(self.external_data)
         return record
 
     @classmethod
@@ -205,27 +208,19 @@ class ComponentSpec:
 
 @dataclass
 class BuildSpec:
-    """The whole trtc_build_spec.json.
+    """The whole trtc_build_spec.json: a schema version and the components.
 
-    Deliberately no TensorRT version field: the builder environment is
-    prebaked with exactly one TensorRT (the image is the pin), the manifest
-    records what the engines were actually built with, and the runtime
-    validates that record against its own environment."""
+    Nothing else on purpose. No TensorRT version (the builder environment is
+    prebaked; the manifest records what engines were actually built with and
+    the runtime validates it) and no export metadata — a build spec says how
+    to build, not where it came from."""
 
-    bundle: str
     components: list[ComponentSpec]
-    engine_dir_hint: str | None = None
-    meta: dict[str, Any] = field(default_factory=dict)
-    provenance: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "trtc_build_spec": BUILD_SPEC_VERSION,
-            "bundle": self.bundle,
-            "engine_dir_hint": self.engine_dir_hint,
             "components": [component.to_dict() for component in self.components],
-            "meta": dict(self.meta),
-            "provenance": dict(self.provenance),
         }
 
     @classmethod
@@ -256,13 +251,18 @@ def write_build_spec(spec: BuildSpec, work_dir: str | Path) -> Path:
 
 def default_build_spec_for_onnx(onnx_path: Path) -> BuildSpec:
     """A default single-component spec synthesized for a bare ONNX file with
-    no trtc_build_spec.json next to it: strongly typed, TensorRT defaults."""
+    no trtc_build_spec.json next to it: strongly typed, TensorRT defaults.
+
+    A sibling '<model>.onnx.data' file (the usual convention for external
+    weight data of >2GB models) is picked up automatically; other layouts
+    need a spec that lists the files under external_data."""
+    external = onnx_path.with_name(f"{onnx_path.name}.data")
     component = ComponentSpec(
-        name=onnx_path.stem,
         onnx=onnx_path.name,
         onnx_sha256=sha256_file(onnx_path),
+        external_data={external.name: sha256_file(external)} if external.exists() else {},
     )
-    return BuildSpec(bundle=component.name, components=[component])
+    return BuildSpec(components=[component])
 
 
 def resolve_build_target(target: str | Path) -> tuple[Path, BuildSpec]:
@@ -280,14 +280,9 @@ def resolve_build_target(target: str | Path) -> tuple[Path, BuildSpec]:
     return onnx_path.parent, default_build_spec_for_onnx(onnx_path)
 
 
-def single_component_spec(spec: BuildSpec, component: ComponentSpec) -> BuildSpec:
-    """The spec reduced to one component — the unit a builder job takes."""
-    return BuildSpec(
-        bundle=spec.bundle,
-        components=[component],
-        meta=dict(spec.meta),
-        provenance=dict(spec.provenance),
-    )
+def single_component_spec(component: ComponentSpec) -> BuildSpec:
+    """A spec of one component — the unit a builder job takes."""
+    return BuildSpec(components=[component])
 
 
 # Tar members become file names on the builder, so accept only single
@@ -302,10 +297,12 @@ def safe_name(name: str) -> str:
 
 
 def pack_job_tar(spec: BuildSpec, work_dir: str | Path) -> bytes:
-    """One builder job as a tar: trtc_build_spec.json with the ONNX it
-    references next to it — the same layout as on disk."""
+    """One builder job as a tar: trtc_build_spec.json with the ONNX (and any
+    external weight data files) it references next to it — the same layout
+    as on disk."""
     if len(spec.components) != 1:
         raise ValueError(f"A builder job takes exactly one component, got {len(spec.components)}")
+    component = spec.components[0]
     work_dir = Path(work_dir)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
@@ -313,10 +310,11 @@ def pack_job_tar(spec: BuildSpec, work_dir: str | Path) -> bytes:
         info = tarfile.TarInfo(BUILD_SPEC_FILE)
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
-        onnx_path = work_dir / spec.components[0].onnx
-        if not onnx_path.exists():
-            raise FileNotFoundError(f"Spec references missing ONNX file: {onnx_path}")
-        archive.add(onnx_path, arcname=spec.components[0].onnx)
+        for name in (component.onnx, *component.external_data):
+            path = work_dir / name
+            if not path.exists():
+                raise FileNotFoundError(f"Spec references missing file: {path}")
+            archive.add(path, arcname=name)
     return buffer.getvalue()
 
 
@@ -347,25 +345,31 @@ def extract_job_tar(data: bytes, dest_dir: str | Path) -> BuildSpec:
     if len(spec.components) != 1:
         raise ValueError(f"a builder job takes exactly one component, got {len(spec.components)}")
     component = spec.components[0]
-    for value in (component.name, component.onnx, component.engine):
-        safe_name(value)
-    if not (dest_dir / component.onnx).exists():
-        raise ValueError(f"job tar spec references {component.onnx!r} but the tar does not contain it")
+    for value in (component.onnx, *component.external_data):
+        safe_name(value)  # the engine name derives from onnx, so this covers it
+        if not (dest_dir / value).exists():
+            raise ValueError(f"job tar spec references {value!r} but the tar does not contain it")
     return spec
 
 
 def assemble_manifest(spec: BuildSpec, component_manifests: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge per-component build results (each a single-component manifest)
     back into the spec — multi-component composition is client-side."""
-    by_name = {m["components"][0]["name"]: m for m in component_manifests}
+    by_onnx = {m["components"][0]["onnx"]: m for m in component_manifests}
     components = []
     build: dict[str, Any] | None = None
     for component in spec.components:
-        result = by_name.get(component.name)
+        result = by_onnx.get(component.onnx)
         if result is None:
-            raise ValueError(f"No build result for component {component.name!r}")
+            raise ValueError(f"No build result for component {component.onnx!r}")
         built = result["components"][0]
-        components.append({**component.to_dict(), **{k: built[k] for k in ("engine_sha256", "engine_size")}})
+        components.append(
+            {
+                **component.to_dict(),
+                "engine": component.engine,
+                **{k: built[k] for k in ("engine_sha256", "engine_size")},
+            }
+        )
         if build is not None and build != result["build"]:
             raise ValueError("Component engines were built in different environments")
         build = result["build"]

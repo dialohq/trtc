@@ -32,13 +32,13 @@ from ..buildspec import (
 from ..spec import Bundle, load_entry, parse_options
 
 
-def _load_bundle(args: argparse.Namespace) -> tuple[Bundle, dict[str, Any]]:
+def _load_bundle(args: argparse.Namespace) -> Bundle:
     factory = load_entry(args.entry)
     options = parse_options(args.set or [])
     bundle = factory(*args.weights, **options)
     if not isinstance(bundle, Bundle):
         raise SystemExit(f"Entry {args.entry!r} returned {type(bundle).__name__}, expected trtc.Bundle")
-    return bundle, options
+    return bundle
 
 
 def _resolve_out_dir(explicit: str | None, bundle: Bundle) -> Path:
@@ -49,23 +49,17 @@ def _resolve_out_dir(explicit: str | None, bundle: Bundle) -> Path:
     raise SystemExit("No output directory: pass --out or set Bundle.engine_dir_hint in the entry")
 
 
-def _run_export(bundle: Bundle, options: dict[str, Any], args: argparse.Namespace) -> Path:
+def _run_export(bundle: Bundle, args: argparse.Namespace) -> Path:
     from .export import export_bundle
 
     out_dir = _resolve_out_dir(args.out, bundle)
-    export_bundle(
-        bundle,
-        out_dir,
-        device=args.device,
-        provenance={"entry": args.entry, "weights": list(args.weights), "options": options},
-    )
+    export_bundle(bundle, out_dir, device=args.device)
     print(f"{BUILD_SPEC_FILE} + ONNX written to {out_dir}")
     return out_dir
 
 
 def cmd_export(args: argparse.Namespace) -> None:
-    bundle, options = _load_bundle(args)
-    _run_export(bundle, options, args)
+    _run_export(_load_bundle(args), args)
 
 
 def _check_builder_trt(builder: str, *, token: str | None) -> None:
@@ -111,7 +105,7 @@ def _submit_spec(
 
     results = []
     for component in spec.components:
-        job_tar = pack_job_tar(single_component_spec(spec, component), work_dir)
+        job_tar = pack_job_tar(single_component_spec(component), work_dir)
         job_id = submit_build(builder, job_tar, output_url=output_url, token=token)
         print(f"submitted {component.name} as job {job_id}")
         job = wait_for_build(builder, job_id, token=token)
@@ -132,8 +126,8 @@ def _submit_spec(
 
 
 def cmd_compile(args: argparse.Namespace) -> None:
-    bundle, options = _load_bundle(args)
-    out_dir = _run_export(bundle, options, args)
+    bundle = _load_bundle(args)
+    out_dir = _run_export(bundle, args)
     _submit_spec(args.builder, read_build_spec(out_dir), out_dir, out_dir, token=args.token)
     if bundle.finalize is not None:
         bundle.finalize(read_json(out_dir / MANIFEST_FILE), out_dir)

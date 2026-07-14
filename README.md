@@ -18,11 +18,22 @@ client reads that lock to pick which builder image to use.
 
 ## Builder images
 
-Pure C++ (see [`trtc-server/`](trtc-server/README.md)) — no Python in the
-image. CI publishes one image per supported TensorRT version (engines are
-TRT-version-locked): `ghcr.io/dialohq/trtc-builder:trt<major.minor>`. The
-supported version list is the `tensorrtPins` attrset in
-[`flake.nix`](flake.nix) — nowhere else.
+Pure C++ (see [`trtc-server/`](trtc-server/README.md) — the spec format, the
+tar API, and every `IBuilderConfig` option are documented there) — no Python
+in the image, ~2GB. CI publishes one image per supported TensorRT version
+(engines are TRT-version-locked), each under three tags:
+
+- `trt10.13` — the moving latest for that TensorRT line
+- `1.0.0-trt10.13` — this trtc release
+- `1.0.0-trt10.13-<nix hash>` — immutable, content-addressed
+
+The supported version list is the `tensorrtPins` attrset in
+[`flake.nix`](flake.nix) — nowhere else. One-shot local builds on a GPU box
+need no image at all:
+
+```sh
+nix run github:dialohq/trtc#build-10.13 -- spec.json model.onnx [data files...] [--out DIR]
+```
 
 Rent a GPU running the version matched to *your* project's lock:
 

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trtc-plan"
+version = "0.1.0"
+description = "The trtc plan/manifest contract: the serialized interface between export, build, and serve"
+readme = "README.md"
+requires-python = ">=3.11"
+# The whole point of this package: the contract both sides import, with
+# nothing else attached. Keep it that way.
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["trtc_plan*"]

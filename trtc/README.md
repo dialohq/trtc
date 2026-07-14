@@ -5,21 +5,24 @@ project's torch; the engine build runs on deployment-class hardware with the
 TensorRT version your lock pins; the runtime refuses engines built for a
 different TensorRT or GPU arch.
 
-## Client and server
+## The workspace
 
-Two uv workspace packages, one CLI each:
+Three uv workspace packages; client and server never import each other —
+they share only the contract package:
 
-- **`trtc`** (this directory; module `trtc`) — runs where the model code
-  lives: `export`, `submit`, `compile` (= export + submit), `launch`,
-  `inspect`, `info`. Zero dependencies, never imports tensorrt. Also carries
-  the shared plan/manifest contract (`trtc.plan`) and the inference runtime
-  (`trtc.runtime`).
+- **`trtc-plan`** ([`trtc-plan/`](../trtc-plan), module `trtc_plan`) — the
+  serialized contract: plan.json, manifest.json, TensorRT version and GPU
+  plumbing. Zero dependencies.
+- **`trtc`** (this directory; module `trtc`) — the client, runs where the
+  model code lives: `export`, `submit`, `compile` (= export + submit),
+  `launch`, `inspect`, `info`. Depends only on `trtc-plan`, never imports
+  tensorrt. Also carries the inference runtime (`trtc.runtime`).
 - **`trtc-server`** ([`trtc-server/`](../trtc-server), module `trtc_server`)
   — runs on GPU hardware with the pinned TensorRT: `serve` (the builder HTTP
-  API) and `build` (engines from a plan dir or bare ONNX). Depends on `trtc`
-  (for the contract) and `tensorrt-cu12`; installing it *is* the builder
-  environment — that's exactly what the image does. Never imports torch or
-  model code. The server builds, end of story.
+  API) and `build` (engines from a plan dir or bare ONNX). Depends on
+  `trtc-plan` and `tensorrt-cu12`; installing it *is* the builder
+  environment — that's exactly what the image does. No torch, no model code,
+  no client code. The server builds, end of story.
 
 ## The three stages
 

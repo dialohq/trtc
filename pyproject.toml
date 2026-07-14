@@ -5,10 +5,7 @@ description = "Workspace root for the trtc client and server packages"
 requires-python = ">=3.11"
 
 [tool.uv.workspace]
-members = ["trtc", "trtc-server"]
-
-[tool.uv.sources]
-trtc = { workspace = true }
+members = ["trtc-plan", "trtc", "trtc-server"]
 
 # NVIDIA's index hosts REAL tensorrt wheels; pypi.org only has a wheel_stub
 # sdist that downloads them at build time — a build-time network fetch that

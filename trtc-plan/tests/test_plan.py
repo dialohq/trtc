@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from trtc.plan import (
+from trtc_plan import (
     PLAN_FILE,
     assemble_manifest,
     build_params,
@@ -55,7 +55,7 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(plan["components"][0]["engine"], "m.engine")
 
     def test_tensorrt_version_comes_from_nearest_uv_lock(self):
-        from trtc.plan import tensorrt_version_from_lock
+        from trtc_plan import tensorrt_version_from_lock
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -71,7 +71,7 @@ class PlanTests(unittest.TestCase):
             self.assertIsNone(tensorrt_version_from_lock(nested))  # nearest lock wins, even without a pin
 
     def test_repo_lock_resolves_tensorrt_pin(self):
-        from trtc.plan import tensorrt_version_from_lock, trt_version_tuple
+        from trtc_plan import tensorrt_version_from_lock, trt_version_tuple
 
         repo_root = Path(__file__).resolve().parents[2]
         locked = tensorrt_version_from_lock(repo_root)
@@ -86,7 +86,7 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(trt_versions_compatible("10.13.3.9", "11.1.0.106"))
 
     def test_nvidia_kernel_module_version_parses_proc(self):
-        from trtc.plan import nvidia_kernel_module_version, query_gpu
+        from trtc_plan import nvidia_kernel_module_version, query_gpu
 
         proc = (
             "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  590.48.01  Release Build"
@@ -100,7 +100,7 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(set(facts), {"gpu_name", "compute_capability", "driver_version"})
 
     def test_trt_pin_satisfied_ignores_post_suffix_but_not_minor(self):
-        from trtc.plan import trt_pin_satisfied
+        from trtc_plan import trt_pin_satisfied
 
         self.assertTrue(trt_pin_satisfied("10.13.3.9.post1", "10.13.3.9"))  # module drops .postN
         self.assertTrue(trt_pin_satisfied("10.13.3.9", "10.13.3.9"))
@@ -113,7 +113,7 @@ class BareOnnxTests(unittest.TestCase):
     CLI/wire string encoding."""
 
     def test_parse_shape_profile_roundtrip(self):
-        from trtc.plan import parse_shape_profile
+        from trtc_plan import parse_shape_profile
 
         name, profile = parse_shape_profile("asr=1x512x128:8x512x256:16x512x1024")
         self.assertEqual(name, "asr")

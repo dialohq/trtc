@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from trtc.plan import (
+from trtc_plan import (
     MANIFEST_FILE,
     query_gpu,
     sha256_file,

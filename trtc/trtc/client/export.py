@@ -11,7 +11,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-from ..plan import PLAN_FILE, component_record, make_plan, sha256_file, write_json
+from trtc_plan import PLAN_FILE, component_record, make_plan, sha256_file, write_json
 from ..spec import Bundle, Component
 
 

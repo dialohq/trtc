@@ -11,6 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: Run trtc-plan tests
+        run: uv run --package trtc-plan python -m unittest discover -s trtc-plan/tests -v
       - name: Run trtc (client) tests
         run: uv run --package trtc python -m unittest discover -s trtc/tests -v
       - name: Run trtc-server tests

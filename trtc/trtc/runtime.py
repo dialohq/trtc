@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping
 
-from .plan import read_manifest, trt_versions_compatible
+from trtc_plan import read_manifest, trt_versions_compatible
 
 _RUNNER_CACHE: dict[str, "EngineRunner"] = {}
 _RUNNER_CACHE_LOCK = threading.Lock()

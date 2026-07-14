@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..plan import (
+from trtc_plan import (
     MANIFEST_FILE,
     query_gpu,
     read_json,
@@ -88,7 +88,7 @@ def _submit_plan(
     one ONNX at a time. With output_url the builder PUTs the engine there
     (single-component only); otherwise engines and the assembled manifest are
     downloaded into out_dir."""
-    from ..plan import assemble_manifest, build_params
+    from trtc_plan import assemble_manifest, build_params
     from .remote import download_engine, submit_build, wait_for_build
 
     components = plan["components"]

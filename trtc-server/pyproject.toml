@@ -8,16 +8,22 @@ version = "0.1.0"
 description = "The trtc builder: TensorRT engines from plans, locally or as an HTTP service"
 readme = "README.md"
 requires-python = ">=3.11"
-# The builder environment is fixed and correct by construction: the server
-# plus the TensorRT the workspace lock pins (CI re-pins per image tag). No
-# per-job resolution happens at runtime.
-dependencies = ["trtc", "tensorrt-cu12"]
+# The builder environment is fixed and correct by construction: the server,
+# the shared contract, and the TensorRT the workspace lock pins (CI re-pins
+# per image tag). No per-job resolution happens at runtime, and no client
+# code ships in the image.
+dependencies = ["trtc-plan", "tensorrt-cu12"]
 
 [project.scripts]
 trtc-server = "trtc_server.cli:main"
+
+[dependency-groups]
+# The round-trip tests drive the server through the real client.
+dev = ["trtc"]
 
 [tool.setuptools.packages.find]
 include = ["trtc_server*"]
 
 [tool.uv.sources]
 trtc = { workspace = true }
+trtc-plan = { workspace = true }

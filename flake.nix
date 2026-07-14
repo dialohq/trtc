@@ -39,19 +39,19 @@
           default = trtc-builder;
 
           # The remote builder: a fixed, correct environment — exactly the
-          # trtc-server workspace member and its locked dependencies (trtc for
-          # the shared plan contract, plus the TensorRT the workspace lock
-          # pins). Pinned to one TensorRT version like a derivation; a plan
-          # pinning a different version fails the job. CI builds one image per
-          # supported version (see the workflow matrix), tagged
-          # trt<major.minor>. Run:
+          # trtc-server workspace member and its locked dependencies
+          # (trtc-plan for the shared contract, plus the TensorRT the
+          # workspace lock pins). No client code ships. Pinned to one
+          # TensorRT version like a derivation; a plan pinning a different
+          # version fails the job. CI builds one image per supported version
+          # (see the workflow matrix), tagged trt<major.minor>. Run:
           #   docker run --gpus all -p 8080:8080 -v trtc-data:/data \
           #       ghcr.io/dialohq/trtc-builder:trt<version>
           trtc-builder = x2container.lib.${system}.uv2container.buildImage {
             name = "trtc-builder";
             src = ./.;
             python = pkgs.python311;
-            members = ["trtc" "trtc-server"];
+            members = ["trtc-plan" "trtc-server"];
             # Only libstdc++ for the manylinux TRT libs; deliberately NOT nix
             # glibc — host-injected FHS binaries must not resolve a foreign
             # libc ahead of their own.
@@ -70,11 +70,15 @@
             };
           };
 
-          # Prebuilt env for `trtc launch` — trtc resolved once at build time,
-          # vastai from the vast-cli input (no runtime installs).
+          # Prebuilt env for `trtc launch` — trtc (+ its trtc-plan contract)
+          # resolved once at build time, vastai from the vast-cli input (no
+          # runtime installs).
           launch-env = pkgs.stdenv.mkDerivation {
             name = "trtc-launch-env";
-            src = ./trtc;
+            src = pkgs.lib.fileset.toSource {
+              root = ./.;
+              fileset = pkgs.lib.fileset.unions [./trtc ./trtc-plan];
+            };
             __noChroot = true;
             dontFixup = true;
             NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
@@ -84,9 +88,9 @@
               runHook preBuild
               export HOME="$TMPDIR" UV_CACHE_DIR="$TMPDIR/uv"
               export UV_PYTHON_PREFERENCE=only-system UV_PYTHON=${pkgs.python311}/bin/python3.11
-              cp -r "$src" ./trtc-src && chmod -R u+w ./trtc-src
+              cp -r "$src" ./src && chmod -R u+w ./src
               uv venv "$out"
-              uv pip install --python "$out/bin/python" ./trtc-src
+              uv pip install --python "$out/bin/python" ./src/trtc-plan ./src/trtc
               runHook postBuild
             '';
             dontInstall = true;

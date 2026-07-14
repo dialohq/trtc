@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "trtc",
+    "trtc-plan",
     "trtc-server",
     "trtc-workspace",
 ]
@@ -1347,6 +1348,9 @@ wheels = [
 name = "trtc"
 version = "0.1.0"
 source = { editable = "trtc" }
+dependencies = [
+    { name = "trtc-plan" },
+]
 
 [package.optional-dependencies]
 launch = [
@@ -1354,8 +1358,16 @@ launch = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "vastai", marker = "extra == 'launch'" }]
+requires-dist = [
+    { name = "trtc-plan", editable = "trtc-plan" },
+    { name = "vastai", marker = "extra == 'launch'" },
+]
 provides-extras = ["launch"]
+
+[[package]]
+name = "trtc-plan"
+version = "0.1.0"
+source = { editable = "trtc-plan" }
 
 [[package]]
 name = "trtc-server"
@@ -1363,14 +1375,22 @@ version = "0.1.0"
 source = { editable = "trtc-server" }
 dependencies = [
     { name = "tensorrt-cu12" },
+    { name = "trtc-plan" },
+]
+
+[package.dev-dependencies]
+dev = [
     { name = "trtc" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "tensorrt-cu12" },
-    { name = "trtc", editable = "trtc" },
+    { name = "trtc-plan", editable = "trtc-plan" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "trtc", editable = "trtc" }]
 
 [[package]]
 name = "trtc-workspace"

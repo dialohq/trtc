@@ -10,8 +10,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-# The client package is a real dependency of trtc-server (for trtc.plan), so
-# these tests drive the server through the actual client.
+# The trtc client is a dev dependency of trtc-server so these tests can
+# drive the server through the real client.
 from trtc.client.remote import download_engine, submit_build, wait_for_build
 from trtc_server.app import BuilderState, make_handler
 from trtc_server.build import _engine_cache_key

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from trtc.plan import MANIFEST_FILE, resolve_build_target, resolve_tensorrt_version
+from trtc_plan import MANIFEST_FILE, resolve_build_target, resolve_tensorrt_version
 
 
 def cmd_build(args: argparse.Namespace) -> None:

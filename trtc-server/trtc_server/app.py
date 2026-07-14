@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from trtc.plan import MANIFEST_FILE, query_gpu, read_json, write_json
+from trtc_plan import MANIFEST_FILE, query_gpu, read_json, write_json
 
 
 class BuilderState:

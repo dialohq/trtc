@@ -80,7 +80,7 @@
           version = "0.1.0";
           src = ./trtc-server;
           nativeBuildInputs = [pkgs.cmake];
-          buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib];
+          buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive];
           cmakeFlags = ["-DTRTC_WITH_TENSORRT=OFF"];
         };
 
@@ -93,7 +93,7 @@
             version = "0.1.0-trt${pin.version}";
             src = ./trtc-server;
             nativeBuildInputs = [pkgs.cmake];
-            buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib cudart];
+            buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive cudart];
             cmakeFlags = [
               "-DTENSORRT_INCLUDE_DIR=${tensorrt}/include"
               "-DTENSORRT_NVINFER=${tensorrt}/lib/libnvinfer.so"
@@ -152,6 +152,7 @@
                 "NVIDIA_VISIBLE_DEVICES=all"
                 "NVIDIA_DRIVER_CAPABILITIES=compute,utility"
                 "TRTC_DATA_DIR=/data"
+                "TRTC_TENSORRT_VERSION=${pin.version}"
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 # TensorRT dlopens pieces of itself (libnvinfer_builder_resource),
                 # libcudart (shipped, nix store), and libcuda (host driver,

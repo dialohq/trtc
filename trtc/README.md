@@ -30,12 +30,55 @@ Or split it: `trtc export ... --out ./work`, then `trtc submit ./work ...`.
 
 ## I have an ONNX file already
 
-No bundle, no plan file — point build or submit at it:
+Write a `trtc_build_spec.json` next to it (or don't — a bare ONNX builds with
+defaults: strongly typed, TensorRT defaults, no profiles), then point submit
+at it:
 
 ```sh
-uv run trtc submit model.onnx --builder http://builder:8080 --out . \
-    --shape input=1x80:8x80:16x80        # min:opt:max per dynamic input
+uv run trtc submit model.onnx --builder http://builder:8080 --out .
 ```
+
+## The build spec
+
+All build options live in **`trtc_build_spec.json`**, sitting next to the
+ONNX it references — the entire `tensorrt.IBuilderConfig`, as JSON. Nothing
+travels as CLI or query parameters:
+
+```json
+{
+  "trtc_build_spec": 1,
+  "components": [
+    {
+      "onnx": "model.onnx",
+      "strongly_typed": true,
+      "profiles": [
+        {"input": {"min": [1, 80], "opt": [8, 80], "max": [16, 80]}},
+        {"input": {"min": [32, 80], "opt": [64, 80], "max": [64, 80]}}
+      ],
+      "builder_config": {
+        "flags": ["TF32", "SPARSE_WEIGHTS"],
+        "memory_pool_limits": {"WORKSPACE": "8G"},
+        "builder_optimization_level": 5,
+        "profiling_verbosity": "DETAILED",
+        "hardware_compatibility_level": "AMPERE_PLUS"
+      },
+      "onnx_sha256": "…optional, verified…",
+      "external_data": {"model.onnx.data": null}
+    }
+  ]
+}
+```
+
+Each entry of `profiles` is one whole optimization profile covering every
+dynamic input; list several to build a multi-profile engine. `builder_config`
+covers every `IBuilderConfig` option expressible as data — flags, memory
+pools, optimization level, DLA, tactic sources, preview features, tiling,
+hardware compatibility; unknown names fail the job loudly with the list the
+builder's TensorRT actually has. `external_data` lists the external weight
+files of >2GB models (a sibling `model.onnx.data` is picked up by convention);
+they travel with the ONNX in every job. `trtc export` writes the spec from
+your `Bundle` declaration (`Component.builder_config` passes through); you
+can also just write the JSON by hand.
 
 ## The builder
 
@@ -68,15 +111,20 @@ It needs a vast.ai key (`VAST_API_KEY` or a configured `vastai`); options:
 
 ### The API
 
-Deliberately dumb: one job is one ONNX (raw bytes or a presigned URL) plus
-query parameters, returning one engine. Multi-component models are composed
-client-side. Engine + timing caches persist under `TRTC_DATA_DIR`, so any HTTP
-client works:
+Deliberately dumb: one job is one tar — `trtc_build_spec.json` with its ONNX
+(and any external weight data files) next to it, the exact on-disk layout —
+returning one engine. No build parameters in the request. Multi-component
+models are composed client-side. Engine + timing caches persist under
+`TRTC_DATA_DIR`, so any HTTP client works:
 
 ```sh
-curl -X POST --data-binary @model.onnx \
-    "http://builder:8080/builds?trt=10.13.3.9.post1&shape=input%3D1x80:8x80:16x80"
+tar cf job.tar trtc_build_spec.json model.onnx model.onnx.data
+curl -X POST -H 'Content-Type: application/x-tar' \
+    --data-binary @job.tar "http://builder:8080/builds"
 ```
+
+`GET /info` reports the TensorRT the image was baked with; the client checks
+it against your `uv.lock` pin before submitting.
 
 ```sh
 # vast.ai

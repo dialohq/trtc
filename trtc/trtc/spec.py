@@ -102,8 +102,12 @@ class Component:
     file_stem: str | None = None
     dtype: str = "float32"
     opset: int = 20
-    workspace_gb: float = 4.0
     strongly_typed: bool = True
+    # tensorrt.IBuilderConfig options for the build stage, passed through as
+    # JSON — the builder validates names against its own TensorRT. e.g.
+    # {"flags": ["TF32"], "memory_pool_limits": {"WORKSPACE": "8G"},
+    #  "builder_optimization_level": 4}
+    builder_config: dict[str, Any] = field(default_factory=dict)
     # Extra dynamic-axis names for outputs, e.g. {"audio": {0: "batch", 2: "audio_samples"}}
     output_axes: Mapping[str, Mapping[int, str]] | None = None
     # Context manager entered around torch.onnx.export (model-owned graph
@@ -123,11 +127,15 @@ class Component:
     def engine_name(self) -> str:
         return f"{self.stem}.engine"
 
-    def profiles(self) -> dict[str, dict[str, list[int]]]:
-        return {
-            tensor_name: {kind: list(ts.shape(kind)) for kind in PROFILE_KINDS}
-            for tensor_name, ts in self.inputs.items()
-        }
+    def profiles(self) -> list[dict[str, dict[str, list[int]]]]:
+        """The component's optimization profiles: one profile derived from
+        the declared axes, covering every input."""
+        return [
+            {
+                tensor_name: {kind: list(ts.shape(kind)) for kind in PROFILE_KINDS}
+                for tensor_name, ts in self.inputs.items()
+            }
+        ]
 
     def dynamic_axes(self) -> dict[str, dict[int, str]]:
         axes: dict[str, dict[int, str]] = {}

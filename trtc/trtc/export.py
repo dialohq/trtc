@@ -1,4 +1,4 @@
-"""Export stage: bundle declaration -> ONNX files + plan.json.
+"""Export stage: bundle declaration -> ONNX files + trtc_build_spec.json.
 
 Runs where the model code lives, with the project's own torch. This is the
 only stage that imports the model; the ONNX+plan directory it produces is
@@ -11,7 +11,7 @@ import contextlib
 from pathlib import Path
 from typing import Any
 
-from .plan import PLAN_FILE, component_record, make_plan, sha256_file, write_json
+from .plan import BUILD_SPEC_VERSION, sha256_file, write_build_spec
 from .spec import Bundle, Component
 
 
@@ -77,45 +77,45 @@ def export_component(component: Component, out_dir: Path, *, device: str) -> Pat
     return onnx_path
 
 
+def _dir_snapshot(directory: Path) -> dict[str, int]:
+    """File name -> mtime_ns, for spotting what an export actually wrote."""
+    return {p.name: p.stat().st_mtime_ns for p in directory.iterdir() if p.is_file()}
+
+
+def new_files(before: dict[str, int], after: dict[str, int]) -> list[str]:
+    """Files created or rewritten between two snapshots."""
+    return sorted(name for name, mtime in after.items() if before.get(name) != mtime)
+
+
 def export_bundle(
     bundle: Bundle,
     out_dir: str | Path,
     *,
     device: str = "cuda",
-    tensorrt_version: str,
-    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    import torch
-
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     components = []
     for component in bundle.components:
         print(f"export {component.name} -> {out_dir / component.onnx_name}")
+        before = _dir_snapshot(out_dir)
         onnx_path = export_component(component, out_dir, device=device)
-        components.append(
-            component_record(
-                name=component.name,
-                onnx=component.onnx_name,
-                engine=component.engine_name,
-                dtype=component.dtype,
-                opset=component.opset,
-                workspace_gb=component.workspace_gb,
-                strongly_typed=component.strongly_typed,
-                profiles=component.profiles(),
-                onnx_sha256=sha256_file(onnx_path),
-                meta=component.meta,
-            )
-        )
+        # Anything else the exporter wrote is external weight data the ONNX
+        # references (models >2GB store tensors outside the protobuf); it
+        # belongs to the component and travels with it.
+        external = [name for name in new_files(before, _dir_snapshot(out_dir)) if name != onnx_path.name]
+        record: dict[str, Any] = {
+            "onnx": component.onnx_name,
+            "strongly_typed": component.strongly_typed,
+            "profiles": component.profiles(),
+            "builder_config": dict(component.builder_config),
+            "onnx_sha256": sha256_file(onnx_path),
+        }
+        if external:
+            record["external_data"] = {name: sha256_file(out_dir / name) for name in external}
+        components.append(record)
 
-    plan = make_plan(
-        bundle=bundle.name,
-        tensorrt_version=tensorrt_version,
-        components=components,
-        engine_dir_hint=bundle.engine_dir_hint,
-        meta=bundle.meta,
-        provenance={"torch_version": torch.__version__, **(provenance or {})},
-    )
-    write_json(out_dir / PLAN_FILE, plan)
-    return plan
+    spec = {"trtc_build_spec": BUILD_SPEC_VERSION, "components": components}
+    write_build_spec(spec, out_dir)
+    return spec

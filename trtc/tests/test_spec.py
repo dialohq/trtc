@@ -56,7 +56,7 @@ class ComponentTests(unittest.TestCase):
             "style": {"min": [1, 128], "opt": [8, 128], "max": [16, 128]},
             "har": {"min": [1, 22, 15361], "opt": [8, 22, 30721], "max": [16, 22, 122881]},
         }
-        self.assertEqual(_styletts2_decoder_component().profiles(), expected)
+        self.assertEqual(_styletts2_decoder_component().profiles(), [expected])
 
     def test_dynamic_axes_cover_inputs_and_outputs(self):
         axes = _styletts2_decoder_component().dynamic_axes()

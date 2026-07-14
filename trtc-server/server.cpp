@@ -1,30 +1,34 @@
 // trtc-server: the builder — a deliberately dumb HTTP job broker on GPU hardware.
 //
-// One job = one ONNX + build parameters in the query string = one engine back.
-// The server knows nothing about models, bundles, or plans — multi-component
-// compilation is N jobs, composed client-side. Each job runs the trtc-build
-// binary sitting next to this one; the environment is fixed (this image ships
-// exactly one TensorRT), and a plan pinning a different version fails the job
-// loudly. Engine and timing caches persist under TRTC_DATA_DIR, so a
-// stopped-and-resumed instance stays warm.
+// One job = one tar (trtc_build_spec.json + the ONNX and any external data
+// files it references, side by side — the exact on-disk layout) = one engine
+// back. All build options live in the spec; the request carries none. The
+// server knows nothing about models or TensorRT — each job runs the
+// trtc-build binary sitting next to this one, and a spec asking for options
+// this image's TensorRT does not have fails the job loudly. Engine and
+// timing caches persist under TRTC_DATA_DIR, so a stopped-and-resumed
+// instance stays warm.
 //
 // API (bearer auth when TRTC_TOKEN is set):
-//   POST /builds?trt=<ver>[&name=][&dtype=][&workspace_gb=][&shape=NAME=MIN:OPT:MAX]*[&output_url=]
-//        body: raw ONNX bytes, or JSON {"input_url": ...} pointing at them
+//   POST /builds[?output_url=<presigned PUT for the engine>]
+//        body: a job tar, or JSON {"input_url": ...} pointing at one
 //   GET  /builds/{id}[?log_offset=N]   status + log; "result" holds the build
 //        facts (single-component manifest) once succeeded
 //   GET  /builds/{id}/artifacts        the engine, as raw bytes
 //   GET  /info                         GPU facts, versions, cache location
 //
 // Environment:
-//   TRTC_TOKEN         optional bearer token required on every request
-//   TRTC_DATA_DIR      jobs + caches root (default ~/.cache/trtc)
-//   TRTC_IDLE_TIMEOUT  seconds of inactivity before the server exits (0 = never)
-//   TRTC_BUILD_EXE     build command override (default: trtc-build next to this binary)
+//   TRTC_TOKEN             optional bearer token required on every request
+//   TRTC_DATA_DIR          jobs + caches root (default ~/.cache/trtc)
+//   TRTC_IDLE_TIMEOUT      seconds of inactivity before the server exits (0 = never)
+//   TRTC_TENSORRT_VERSION  the TensorRT baked into this image (reported by /info)
+//   TRTC_BUILD_EXE         build command override (default: trtc-build next to this binary)
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <archive.h>
+#include <archive_entry.h>
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -45,6 +49,8 @@ using namespace trtc;
 #ifndef TRTC_VERSION
 #define TRTC_VERSION "dev"
 #endif
+
+static const char *SPEC_FILE = "trtc_build_spec.json";
 
 static long now_seconds() {
   return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -87,45 +93,64 @@ struct State {
   }
 };
 
-// Build parameters live in the query string; 'shape' repeats.
-static json parse_build_params(const httplib::Params &query) {
-  auto get = [&](const char *key, const char *fallback) {
-    auto it = query.find(key);
-    return it == query.end() ? std::string(fallback) : it->second;
-  };
-  if (get("trt", "").empty()) throw std::runtime_error("missing required query parameter: trt (the tensorrt pin)");
-  std::string name = get("name", "model");
-  if (!is_safe_name(name))
-    throw std::runtime_error("invalid name '" + name + "': expected [A-Za-z0-9._-], no separators or '..'");
-  json shapes = json::array();
-  auto [begin, end] = query.equal_range("shape");
-  for (auto it = begin; it != end; ++it) shapes.push_back(it->second);
-  return {
-      {"trt_version", get("trt", "")},
-      {"name", name},
-      {"dtype", get("dtype", "float32")},
-      {"workspace_gb", std::stod(get("workspace_gb", "4"))},
-      {"shapes", shapes},
-  };
+// Unpack one job tar into dest and return its validated spec. Members are
+// written by hand (never a library extract-to-disk) and must be regular
+// files with safe single-segment names; the spec must reference exactly one
+// component whose files are all present.
+static json extract_job_tar(const std::string &data, const fs::path &dest) {
+  fs::create_directories(dest);
+  auto archive = std::unique_ptr<struct archive, decltype(&archive_read_free)>(archive_read_new(), archive_read_free);
+  archive_read_support_format_tar(archive.get());
+  archive_read_support_filter_all(archive.get());  // plain, gzip, zstd — tar is tar
+  if (archive_read_open_memory(archive.get(), data.data(), data.size()) != ARCHIVE_OK)
+    throw std::runtime_error("not a tar: " + std::string(archive_error_string(archive.get())));
+
+  struct archive_entry *entry;
+  while (archive_read_next_header(archive.get(), &entry) == ARCHIVE_OK) {
+    std::string name = archive_entry_pathname(entry) ? archive_entry_pathname(entry) : "";
+    if (name.rfind("./", 0) == 0) name = name.substr(2);
+    if (name.empty() || name.back() == '/') continue;  // directory entries
+    if (archive_entry_filetype(entry) != AE_IFREG)
+      throw std::runtime_error("job tar member '" + name + "' is not a regular file");
+    if (!is_safe_name(name))
+      throw std::runtime_error("job tar member '" + name + "' is not a safe file name");
+    std::string content;
+    const void *block;
+    size_t size;
+    la_int64_t offset;
+    int code;
+    while ((code = archive_read_data_block(archive.get(), &block, &size, &offset)) == ARCHIVE_OK)
+      content.append(static_cast<const char *>(block), size);
+    if (code != ARCHIVE_EOF) throw std::runtime_error("job tar read failed at '" + name + "'");
+    write_file(dest / name, content);
+  }
+
+  if (!fs::exists(dest / SPEC_FILE)) throw std::runtime_error("job tar has no " + std::string(SPEC_FILE));
+  json spec = read_json(dest / SPEC_FILE);
+  if (spec.value("trtc_build_spec", 0) != 1)
+    throw std::runtime_error("unsupported trtc_build_spec version (expected 1)");
+  if (!spec.contains("components") || spec["components"].size() != 1)
+    throw std::runtime_error("a builder job takes exactly one component");
+  const json &component = spec["components"][0];
+  json files = {{std::string(component.at("onnx")), nullptr}};
+  files.update(component.value("external_data", json::object()));
+  for (const auto &[name, _] : files.items()) {
+    if (!is_safe_name(name)) throw std::runtime_error("spec references unsafe file name '" + name + "'");
+    if (!fs::exists(dest / name))
+      throw std::runtime_error("spec references '" + name + "' but the tar does not contain it");
+  }
+  return spec;
 }
 
-// Runs the trtc-build binary shipped next to this server. No per-job
-// resolution: if the plan pins a TensorRT this image does not provide,
-// trtc-build fails the job loudly; run the image built for that version.
-static std::vector<std::string> build_command(State &state, const fs::path &onnx, const fs::path &out,
-                                              const json &params) {
-  std::string trt = params["trt_version"];
-  std::vector<std::string> argv = {
-      state.build_exe, onnx.string(),
-      "--name", params["name"],
-      "--dtype", params["dtype"],
-      "--workspace-gb", std::to_string(double(params["workspace_gb"])),
-      "--trt-version", trt,
+// Runs the trtc-build binary shipped next to this server on the extracted
+// job dir; every build option comes from the spec inside it.
+static std::vector<std::string> build_command(State &state, const fs::path &input_dir, const fs::path &out) {
+  std::string trt = getenv("TRTC_TENSORRT_VERSION") ? getenv("TRTC_TENSORRT_VERSION") : "local";
+  return {
+      state.build_exe, input_dir.string(),
       "--out", out.string(),
       "--timing-cache", (state.cache_dir / ("timing_trt" + trt + ".bin")).string(),
   };
-  for (const auto &shape : params["shapes"]) argv.push_back("--shape"), argv.push_back(shape);
-  return argv;
 }
 
 // fork/exec (no shell) with stdout+stderr appended to the job log.
@@ -163,20 +188,20 @@ static std::pair<std::string, std::string> split_url(const std::string &url) {
 }
 
 static fs::path engine_path(State &state, const json &status) {
-  return state.job_dir(status["id"]) / "engines" / (std::string(status["params"]["name"]) + ".engine");
+  fs::path onnx = std::string(status["spec"]["components"][0]["onnx"]);
+  return state.job_dir(status["id"]) / "engines" / (onnx.stem().string() + ".engine");
 }
 
 static void run_job(State &state, const std::string &id) {
   fs::path job_dir = state.job_dir(id);
+  fs::path input_dir = job_dir / "input";
   fs::path output_dir = job_dir / "engines";
   fs::path log_path = job_dir / "job.log";
   json status = state.read_status(id).value();
-  json params = status["params"];
   state.in_flight++;
   state.touch();
   state.write_status(id, {{"state", "running"}, {"started_at", unix_time()}});
   try {
-    fs::path onnx_path = job_dir / "input" / (std::string(params["name"]) + ".onnx");
     if (status.contains("input_url") && !status["input_url"].is_null()) {
       auto [base, path] = split_url(status["input_url"]);
       httplib::Client client(base);
@@ -185,11 +210,11 @@ static void run_job(State &state, const std::string &id) {
       auto response = client.Get(path);
       if (!response || response->status != 200)
         throw std::runtime_error("input_url fetch failed (" + std::to_string(response ? response->status : 0) + ")");
-      write_file(onnx_path, response->body);
+      status = state.write_status(id, {{"spec", extract_job_tar(response->body, input_dir)}});
     }
 
     fs::create_directories(output_dir);
-    int code = run_logged(build_command(state, onnx_path, output_dir, params), log_path, state.cache_dir);
+    int code = run_logged(build_command(state, input_dir, output_dir), log_path, state.cache_dir);
     if (code != 0) throw std::runtime_error("build command exited with " + std::to_string(code) + " (see job log)");
 
     if (status.contains("output_url") && !status["output_url"].is_null()) {
@@ -303,6 +328,7 @@ int main(int argc, char **argv) {
       if (it->is_directory()) ++jobs;
     json info = query_gpu();
     info["trtc"] = TRTC_VERSION;
+    info["tensorrt"] = getenv("TRTC_TENSORRT_VERSION") ? json(getenv("TRTC_TENSORRT_VERSION")) : json(nullptr);
     info["jobs"] = jobs;
     info["cache_dir"] = state.cache_dir.string();
     send_json(response, 200, info);
@@ -336,11 +362,9 @@ int main(int argc, char **argv) {
   });
 
   server.Post("/builds", [&](const httplib::Request &request, httplib::Response &response) {
-    json status;
-    std::string body_onnx;
+    std::string id = new_job_id();
+    json status = {{"state", "queued"}, {"created_at", unix_time()}};
     try {
-      json params = parse_build_params(request.params);
-      status = {{"state", "queued"}, {"created_at", unix_time()}, {"params", params}};
       if (request.has_param("output_url")) status["output_url"] = request.get_param_value("output_url");
       if (request.get_header_value("Content-Type").rfind("application/json", 0) == 0) {
         json body = json::parse(request.body);
@@ -348,17 +372,16 @@ int main(int argc, char **argv) {
           throw std::runtime_error("JSON submissions require input_url");
         status["input_url"] = body["input_url"];
       } else if (!request.body.empty()) {
-        body_onnx = request.body;  // raw ONNX bytes; written below once the job dir exists
+        // A job tar: validated and unpacked now, so malformed submissions
+        // fail the request instead of the job.
+        status["spec"] = extract_job_tar(request.body, state.job_dir(id) / "input");
       } else {
-        throw std::runtime_error("empty body: send raw ONNX bytes or JSON with input_url");
+        throw std::runtime_error("empty body: send a job tar or JSON with input_url");
       }
     } catch (const std::exception &error) {
       return send_json(response, 400, {{"error", error.what()}});
     }
 
-    std::string id = new_job_id();
-    if (!body_onnx.empty())
-      write_file(state.job_dir(id) / "input" / (std::string(status["params"]["name"]) + ".onnx"), body_onnx);
     state.write_status(id, status);
     {
       std::lock_guard guard(state.lock);

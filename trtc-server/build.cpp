@@ -1,4 +1,4 @@
-// trtc-build: trtc_build_spec.json + ONNX -> TensorRT engines + manifest.json.
+// The `build` subcommand: trtc_build_spec.json + ONNX -> TensorRT engines + manifest.json.
 //
 // All build options live in the spec sitting next to the ONNX — the entire
 // tensorrt::IBuilderConfig, as JSON. C++ has no reflection, so the mapping is
@@ -7,7 +7,7 @@
 // has. Runs on hardware matching the deployment GPU, against the one
 // TensorRT this binary was built with.
 //
-//   trtc-build <spec dir | model.onnx> [--out DIR] [--timing-cache FILE] [--force]
+//   trtc-server build <spec dir | model.onnx> [--out DIR] [--timing-cache FILE] [--force]
 //
 // A bare model.onnx uses the trtc_build_spec.json next to it, or defaults
 // (strongly typed, TensorRT defaults, no profiles). The spec:
@@ -290,7 +290,7 @@ static void build_engine(const json &component, const fs::path &onnx_path, const
   write_file(engine_file, std::string(static_cast<const char *>(serialized->data()), serialized->size()));
 }
 
-int main(int argc, char **argv) try {
+int build_main(int argc, char **argv) try {
   std::string target, out, timing_cache_path;
   bool force = false;
   for (int i = 1; i < argc; ++i) {
@@ -305,7 +305,7 @@ int main(int argc, char **argv) try {
     else if (arg.rfind("--", 0) == 0) throw std::runtime_error("unknown flag " + arg);
     else target = arg;
   }
-  if (target.empty()) throw std::runtime_error("usage: trtc-build <spec dir | model.onnx> [--out DIR] [--timing-cache FILE] [--force]");
+  if (target.empty()) throw std::runtime_error("usage: trtc-server build <spec dir | model.onnx> [--out DIR] [--timing-cache FILE] [--force]");
 
   auto [work_dir, spec] = load_spec(target);
   if (spec.value("trtc_build_spec", 0) != 1)
@@ -422,6 +422,6 @@ int main(int argc, char **argv) try {
   std::printf("engines + manifest.json written to %s\n", out_dir.c_str());
   return 0;
 } catch (const std::exception &error) {
-  std::fprintf(stderr, "trtc-build: %s\n", error.what());
+  std::fprintf(stderr, "trtc-server build: %s\n", error.what());
   return 1;
 }

@@ -9,12 +9,15 @@ different TensorRT or GPU arch.
 
 | stage | needs | produces |
 |---|---|---|
-| **export** | project env (exact locked torch), model code, any CUDA GPU | `*.onnx` + `plan.json` |
-| **build** | GPU matching deployment arch, `tensorrt-cu12` matching the pin — no torch, no model code | `*.engine` + `manifest.json` |
+| **export** | project env (exact locked torch), model code, any CUDA GPU | `*.onnx` + `trtc_build_spec.json` |
+| **build** | a builder — the C++ image with its prebaked TensorRT ([`trtc-server/`](../trtc-server/README.md)) | `*.engine` + `manifest.json` |
 | **serve** | `trtc.runtime` validates the manifest (TRT version, compute capability) before loading engines | |
 
-The TensorRT pin is read from **`uv.lock`** (nearest lock wins; `--trt-version`
-overrides). `trtc` itself declares no dependencies.
+The TensorRT version is **not a build parameter** — each builder image is
+prebaked with exactly one. Your **`uv.lock`** pin (nearest lock wins) picks
+which image `trtc launch` starts, and `trtc submit`/`compile` refuse a
+builder whose baked TensorRT (from `GET /info`) doesn't match it. `trtc`
+itself declares no dependencies.
 
 ## I have a torch model
 
@@ -89,9 +92,15 @@ one TensorRT from NVIDIA's official tarball, hash-pinned in `flake.nix` (the
 [`trtc-server/`](../trtc-server/README.md). Like a nix derivation, the image
 is pinned to one TensorRT version; a plan pinning a different version fails
 the job loudly (you run a builder image built for that version instead).
-Building locally on a GPU box without the image is
-`nix run .#trtc-server-trt10-13 -- ...` territory — the same `trtc-build`
-binary the image ships.
+Building locally on a GPU box without the image:
+
+```sh
+nix run github:dialohq/trtc#build-10.13 -- spec.json model.onnx [data files...] [--out DIR]
+```
+
+— the same `trtc-build` binary the image ships. Images are tagged
+`trt10.13` (moving), `1.0.0-trt10.13` (release), and
+`1.0.0-trt10.13-<nix hash>` (immutable).
 
 ### Launch one on vast.ai
 
@@ -132,9 +141,10 @@ vastai create instance <offer> --image ghcr.io/dialohq/trtc-builder:trt11.1 \
     --disk 40 --env '-p 8080:8080 -e TRTC_TOKEN=...'
 
 # anywhere with a GPU
-docker run --gpus all -p 8080:8080 -v trtc-data:/data ghcr.io/dialohq/trtc-builder
+docker run --gpus all -p 8080:8080 -v trtc-data:/data \
+    ghcr.io/dialohq/trtc-builder:trt10.13
 ```
 
 Set `TRTC_TOKEN` for auth, `TRTC_IDLE_TIMEOUT` for self-shutdown on idle.
-`trtc inspect <dir>` pretty-prints plans/manifests; `trtc info` shows local
+`trtc inspect <dir>` pretty-prints specs/manifests; `trtc info` shows local
 GPU + TRT facts.

@@ -24,6 +24,10 @@
         n2c = nix2container.packages.${system}.nix2container;
         cudart = pkgs.cudaPackages.cuda_cudart;
 
+        # The trtc release version: reported by /info and part of the image
+        # tags (1.0.0-trt10.13).
+        trtcVersion = "1.0.0";
+
         # The supported TensorRT versions: NVIDIA's official tarballs (lib/ +
         # include/ in one artifact), pinned by hash. Engines are
         # TRT-version-locked, so CI builds one image per entry, tagged
@@ -47,13 +51,16 @@
         };
 
         # Shared libraries + headers out of the tarball; the multi-GB static
-        # libs stay behind.
+        # libs stay behind. TensorRT dlopens pieces of itself
+        # (libnvinfer_builder_resource), libcudart, and libcuda (host driver)
+        # by bare soname — bake all of that into libnvinfer's RUNPATH so no
+        # LD_LIBRARY_PATH is ever needed, in the image or out of it.
         tensorrtFor = pin:
           pkgs.stdenv.mkDerivation {
             pname = "tensorrt";
             inherit (pin) version;
             src = pkgs.fetchurl {inherit (pin) url sha256;};
-            nativeBuildInputs = [pkgs.zstd]; # 11.1 ships .tar.zst; tar autodetects
+            nativeBuildInputs = [pkgs.zstd pkgs.patchelf]; # 11.1 ships .tar.zst; tar autodetects
             sourceRoot = "TensorRT-${pin.version}";
             dontConfigure = true;
             dontBuild = true;
@@ -61,27 +68,31 @@
               mkdir -p $out/lib
               cp -a include $out/include
               cp -a lib/*.so* $out/lib/
+              for lib in $out/lib/libnvinfer.so.* $out/lib/libnvonnxparser.so.*; do
+                [ -L "$lib" ] || patchelf --set-rpath \
+                  '$ORIGIN:${pkgs.lib.getLib cudart}/lib:${driverLibraryPath}' "$lib"
+              done
             '';
-            dontFixup = true; # manylinux binaries; leave their rpaths alone
+            dontFixup = true; # manylinux binaries; only the targeted rpath above
           };
 
         # The GPU-container contract. libcuda always comes from the HOST
-        # driver, injected by the container runtime. Nix binaries never read
-        # the container's /etc/ld.so.cache, so the injection locations must be
-        # on LD_LIBRARY_PATH: /usr/local/nvidia is the legacy mount,
-        # /usr/lib/x86_64-linux-gnu is where nvidia-container-toolkit actually
-        # places driver libs.
+        # driver, injected by the container runtime at these FHS locations
+        # (/usr/local/nvidia is the legacy mount, /usr/lib/x86_64-linux-gnu is
+        # where nvidia-container-toolkit actually places driver libs). Nix
+        # binaries never read /etc/ld.so.cache, so these paths are baked into
+        # TensorRT's RUNPATH and tried directly by our dlopen.
         driverLibraryPath = "/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/lib/x86_64-linux-gnu";
 
         # The HTTP broker alone — no TensorRT, cheap to build, used by CI for
         # the end-to-end test.
         trtc-broker = pkgs.stdenv.mkDerivation {
           pname = "trtc-broker";
-          version = "0.1.0";
+          version = trtcVersion;
           src = ./trtc-server;
           nativeBuildInputs = [pkgs.cmake];
           buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive];
-          cmakeFlags = ["-DTRTC_WITH_TENSORRT=OFF"];
+          cmakeFlags = ["-DTRTC_WITH_TENSORRT=OFF" "-DTRTC_VERSION=${trtcVersion}"];
         };
 
         # Both binaries, linked against one pinned TensorRT.
@@ -90,11 +101,12 @@
         in
           pkgs.stdenv.mkDerivation {
             pname = "trtc-server";
-            version = "0.1.0-trt${pin.version}";
+            version = "${trtcVersion}-trt${pin.version}";
             src = ./trtc-server;
             nativeBuildInputs = [pkgs.cmake];
             buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive cudart];
             cmakeFlags = [
+              "-DTRTC_VERSION=${trtcVersion}"
               "-DTENSORRT_INCLUDE_DIR=${tensorrt}/include"
               "-DTENSORRT_NVINFER=${tensorrt}/lib/libnvinfer.so"
               "-DTENSORRT_NVONNXPARSER=${tensorrt}/lib/libnvonnxparser.so"
@@ -118,8 +130,8 @@
           echo "root:x:0:" > $out/etc/group
         '';
 
-        # The builder image: two static-feeling binaries and one TensorRT, and
-        # nothing else. TRT sits in its own layer so image pushes reuse it.
+        # The builder image: one binary and one TensorRT, and nothing else.
+        # TRT sits in its own layer so image pushes reuse it.
         imageFor = pin:
           n2c.buildImage {
             name = "trtc-builder";
@@ -154,12 +166,10 @@
                 "TRTC_DATA_DIR=/data"
                 "TRTC_TENSORRT_VERSION=${pin.version}"
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-                # TensorRT dlopens pieces of itself (libnvinfer_builder_resource),
-                # libcudart (shipped, nix store), and libcuda (host driver,
-                # injected by the container runtime) — all resolved here.
-                "LD_LIBRARY_PATH=${tensorrtFor pin}/lib:${pkgs.lib.getLib cudart}/lib:${driverLibraryPath}"
+                # No LD_LIBRARY_PATH: every library location is baked into the
+                # binaries' and TensorRT's RUNPATHs.
               ];
-              Cmd = ["/bin/trtc-server" "serve" "--host" "0.0.0.0" "--port" "8080"];
+              Cmd = ["/bin/trtc-server"];
               ExposedPorts."8080/tcp" = {};
               Volumes."/data" = {};
             };
@@ -204,7 +214,10 @@
               text = ''exec ${launch-env}/bin/trtc launch "$@"'';
             };
 
-            # Pushes every pinned builder image, tagged trt<major.minor>.
+            # Pushes every pinned builder image under three tags:
+            #   trt10.13                          the moving latest for that TRT line
+            #   1.0.0-trt10.13                    this trtc release
+            #   1.0.0-trt10.13-<nix image hash>   immutable, content-addressed
             # The version list lives here in the flake, nowhere else:
             #   nix run .#push-builder-images -- "user:token" ghcr.io/dialohq/trtc-builder
             push-builder-images = pkgs.writeShellApplication {
@@ -212,9 +225,13 @@
               text = ''
                 creds=$1
                 registry=$2
-                ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (v: pin: ''
-                  ${(imageFor pin).copyTo}/bin/copy-to --dest-creds "$creds" "docker://$registry:trt${v}"
-                  echo "pushed $registry:trt${v}"
+                ${pkgs.lib.concatStringsSep "\n" (pkgs.lib.mapAttrsToList (v: pin: let
+                  image = imageFor pin;
+                in ''
+                  for tag in "trt${v}" "${trtcVersion}-trt${v}" "${trtcVersion}-trt${v}-${image.imageTag}"; do
+                    ${image.copyTo}/bin/copy-to --dest-creds "$creds" "docker://$registry:$tag"
+                    echo "pushed $registry:$tag"
+                  done
                 '')
                 tensorrtPins)}
               '';

@@ -3,9 +3,9 @@
 // One job = one tar (trtc_build_spec.json + the ONNX and any external data
 // files it references, side by side — the exact on-disk layout) = one engine
 // back. All build options live in the spec; the request carries none. The
-// server knows nothing about models or TensorRT — each job runs the
-// trtc-build binary sitting next to this one, and a spec asking for options
-// this image's TensorRT does not have fails the job loudly. Engine and
+// broker knows nothing about models or TensorRT — each job re-execs this
+// same binary's `build` subcommand, and a spec asking for options this
+// image's TensorRT does not have fails the job loudly. Engine and
 // timing caches persist under TRTC_DATA_DIR, so a stopped-and-resumed
 // instance stays warm.
 //
@@ -22,7 +22,7 @@
 //   TRTC_DATA_DIR          jobs + caches root (default ~/.cache/trtc)
 //   TRTC_IDLE_TIMEOUT      seconds of inactivity before the server exits (0 = never)
 //   TRTC_TENSORRT_VERSION  the TensorRT baked into this image (reported by /info)
-//   TRTC_BUILD_EXE         build command override (default: trtc-build next to this binary)
+//   TRTC_BUILD_EXE         build command override (default: this binary, `build` subcommand)
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
@@ -142,12 +142,12 @@ static json extract_job_tar(const std::string &data, const fs::path &dest) {
   return spec;
 }
 
-// Runs the trtc-build binary shipped next to this server on the extracted
-// job dir; every build option comes from the spec inside it.
+// Jobs run this same binary's `build` subcommand in a fresh process (crash
+// isolation); every build option comes from the spec in the job dir.
 static std::vector<std::string> build_command(State &state, const fs::path &input_dir, const fs::path &out) {
   std::string trt = getenv("TRTC_TENSORRT_VERSION") ? getenv("TRTC_TENSORRT_VERSION") : "local";
   return {
-      state.build_exe, input_dir.string(),
+      state.build_exe, "build", input_dir.string(),
       "--out", out.string(),
       "--timing-cache", (state.cache_dir / ("timing_trt" + trt + ".bin")).string(),
   };
@@ -263,7 +263,7 @@ static void send_json(httplib::Response &response, int code, const json &payload
   response.set_content(payload.dump(), "application/json");
 }
 
-int main(int argc, char **argv) {
+int serve_main(int argc, char **argv) {
   std::string host = "0.0.0.0";
   int port = 8080;
   for (int i = 1; i < argc; ++i) {
@@ -285,11 +285,10 @@ int main(int argc, char **argv) {
   state.cache_dir = data_dir / "cache";
   fs::create_directories(state.jobs_dir);
   fs::create_directories(state.cache_dir);
-  // The build tool ships next to this binary; TRTC_BUILD_EXE overrides (tests
-  // stub it with a fake that needs no GPU).
-  state.build_exe = getenv("TRTC_BUILD_EXE")
-                        ? getenv("TRTC_BUILD_EXE")
-                        : (fs::read_symlink("/proc/self/exe").parent_path() / "trtc-build").string();
+  // Jobs exec this very binary's `build` subcommand; TRTC_BUILD_EXE overrides
+  // (tests stub it with a fake that needs no GPU).
+  state.build_exe = getenv("TRTC_BUILD_EXE") ? getenv("TRTC_BUILD_EXE")
+                                             : fs::read_symlink("/proc/self/exe").string();
   std::string token = getenv("TRTC_TOKEN") ? getenv("TRTC_TOKEN") : "";
 
   std::thread(worker_loop, std::ref(state)).detach();

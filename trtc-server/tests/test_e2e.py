@@ -73,6 +73,7 @@ class ServerE2ETests(unittest.TestCase):
             textwrap.dedent(
                 """\
                 #!/bin/sh
+                [ "$1" = "build" ] && shift   # the broker execs `<exe> build <dir> ...`
                 input=$1; shift
                 while [ $# -gt 0 ]; do
                   case $1 in

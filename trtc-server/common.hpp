@@ -107,10 +107,19 @@ inline json nvidia_kernel_module_version() {
 
 // Hardware facts straight from the CUDA driver API, via dlopen on
 // libcuda.so.1 — the host-injected driver library. Degrades to nulls off-GPU.
+// The host driver injects libcuda at well-known FHS locations; try them
+// directly so no LD_LIBRARY_PATH is ever needed.
+inline void *open_libcuda() {
+  for (const char *candidate : {"libcuda.so.1", "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+                                "/usr/local/nvidia/lib64/libcuda.so.1", "/usr/local/nvidia/lib/libcuda.so.1"})
+    if (void *cuda = dlopen(candidate, RTLD_LAZY)) return cuda;
+  return nullptr;
+}
+
 inline json query_gpu() {
   json info = {{"gpu_name", nullptr}, {"compute_capability", nullptr}, {"driver_version", nullptr}};
 
-  if (void *cuda = dlopen("libcuda.so.1", RTLD_LAZY)) {
+  if (void *cuda = open_libcuda()) {
     auto cuInit = reinterpret_cast<int (*)(unsigned)>(dlsym(cuda, "cuInit"));
     auto cuDeviceGet = reinterpret_cast<int (*)(int *, int)>(dlsym(cuda, "cuDeviceGet"));
     auto cuDeviceGetName = reinterpret_cast<int (*)(char *, int, int)>(dlsym(cuda, "cuDeviceGetName"));

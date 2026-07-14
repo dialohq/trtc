@@ -107,6 +107,17 @@
             env.NIX_CFLAGS_COMPILE = "-isystem ${pkgs.lib.getDev pkgs.cudaPackages.cuda_nvcc}/include";
           };
 
+        # The bare-image survival kit for stock runtimes: glibc needs
+        # nsswitch.conf to resolve DNS (presigned S3 URLs), some tooling wants
+        # a passwd entry, and /tmp + /data must exist even before a volume is
+        # mounted. No shell, no coreutils — this is the whole filesystem.
+        fsRoot = pkgs.runCommand "trtc-fs" {} ''
+          mkdir -p $out/etc $out/tmp $out/data $out/root
+          echo "hosts: files dns" > $out/etc/nsswitch.conf
+          echo "root:x:0:0:root:/root:/bin/trtc-server" > $out/etc/passwd
+          echo "root:x:0:" > $out/etc/group
+        '';
+
         # The builder image: two static-feeling binaries and one TensorRT, and
         # nothing else. TRT sits in its own layer so image pushes reuse it.
         imageFor = pin:
@@ -118,10 +129,26 @@
                 paths = [(serverFor pin)];
                 pathsToLink = ["/bin"];
               })
+              fsRoot
+            ];
+            perms = [
+              {
+                path = fsRoot;
+                regex = "/tmp";
+                mode = "1777";
+              }
+              {
+                path = fsRoot;
+                regex = "/data";
+                mode = "0755";
+              }
             ];
             layers = [(n2c.buildLayer {deps = [(tensorrtFor pin) (pkgs.lib.getLib cudart)];})];
             config = {
               Env = [
+                "PATH=/bin"
+                "USER=root"
+                "HOME=/root"
                 "NVIDIA_VISIBLE_DEVICES=all"
                 "NVIDIA_DRIVER_CAPABILITIES=compute,utility"
                 "TRTC_DATA_DIR=/data"
@@ -132,6 +159,8 @@
                 "LD_LIBRARY_PATH=${tensorrtFor pin}/lib:${pkgs.lib.getLib cudart}/lib:${driverLibraryPath}"
               ];
               Cmd = ["/bin/trtc-server" "serve" "--host" "0.0.0.0" "--port" "8080"];
+              ExposedPorts."8080/tcp" = {};
+              Volumes."/data" = {};
             };
           };
 

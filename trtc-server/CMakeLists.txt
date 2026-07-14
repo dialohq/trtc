@@ -7,13 +7,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(Threads REQUIRED)
+find_package(LibArchive REQUIRED)
 find_path(HTTPLIB_INCLUDE_DIR httplib.h REQUIRED)
 
 # The HTTP broker: no TensorRT anywhere near it.
 add_executable(trtc-server server.cpp)
 target_include_directories(trtc-server PRIVATE ${HTTPLIB_INCLUDE_DIR})
 target_link_libraries(trtc-server PRIVATE OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json
-                                          Threads::Threads ${CMAKE_DL_LIBS})
+                                          LibArchive::LibArchive Threads::Threads ${CMAKE_DL_LIBS})
 
 # The build tool: links the one TensorRT this image ships. OFF builds just the
 # broker (tests stub the build step, no GPU or TensorRT needed).

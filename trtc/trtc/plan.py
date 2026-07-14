@@ -1,24 +1,30 @@
-"""Build plan and manifest: the serialized contract between the three stages.
+"""Build specs and manifests: the serialized contract with the builder.
 
-- plan.json (written by export, consumed by build): everything the builder
-  needs, next to the ONNX files. No model code, no torch.
-- manifest.json (written by build, consumed by the runtime): the plan plus
-  build facts (actual TensorRT version, GPU arch, engine hashes). The runtime
-  refuses engines whose build facts don't match its environment.
+- trtc_build_spec.json (written by `trtc export` or by hand) sits next to the
+  ONNX files it references and carries every build option — the entire
+  tensorrt.IBuilderConfig, as JSON (the builder validates option names
+  against its own TensorRT and fails loudly on unknowns). One builder job is
+  one tar: the spec plus the single ONNX (and any external weight data files)
+  it references, the exact on-disk layout.
+- manifest.json (written by the builder, consumed by the runtime): the spec
+  plus build facts (actual TensorRT version, GPU arch, engine hashes). The
+  runtime refuses engines whose build facts don't match its environment.
 """
 
 from __future__ import annotations
 
 import ctypes
 import hashlib
+import io
 import json
 import re
+import tarfile
 from pathlib import Path
 from typing import Any
 
-PLAN_FILE = "plan.json"
+BUILD_SPEC_FILE = "trtc_build_spec.json"
 MANIFEST_FILE = "manifest.json"
-PLAN_VERSION = 1
+BUILD_SPEC_VERSION = 1
 
 
 def sha256_file(path: Path) -> str:
@@ -37,123 +43,97 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def component_record(
-    *,
-    name: str,
-    onnx: str,
-    dtype: str,
-    workspace_gb: float,
-    profiles: dict[str, dict[str, list[int]]],
-    onnx_sha256: str,
-    engine: str | None = None,
-    strongly_typed: bool = True,
-    opset: int | None = None,
-    meta: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """One component entry of a plan — the unit `trtc build` consumes."""
-    record: dict[str, Any] = {
-        "name": name,
-        "onnx": onnx,
-        "engine": engine or f"{Path(onnx).stem}.engine",
-        "dtype": dtype,
-        "workspace_bytes": int(workspace_gb * (1 << 30)),
-        "strongly_typed": strongly_typed,
-        "profiles": profiles,
-        "onnx_sha256": onnx_sha256,
-        "meta": dict(meta or {}),
-    }
-    if opset is not None:
-        record["opset"] = opset
-    return record
+def component_name(component: dict[str, Any]) -> str:
+    return Path(component["onnx"]).stem
 
 
-def make_plan(
-    *,
-    bundle: str,
-    tensorrt_version: str,
-    components: list[dict[str, Any]],
-    engine_dir_hint: str | None = None,
-    meta: dict[str, Any] | None = None,
-    provenance: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "trtc_plan": PLAN_VERSION,
-        "bundle": bundle,
-        "tensorrt_version": tensorrt_version,
-        "engine_dir_hint": engine_dir_hint,
-        "components": components,
-        "meta": dict(meta or {}),
-        "provenance": dict(provenance or {}),
-    }
+def engine_name(component: dict[str, Any]) -> str:
+    return f"{component_name(component)}.engine"
 
 
-def plan_for_onnx(
-    onnx_path: Path,
-    *,
-    tensorrt_version: str,
-    name: str | None = None,
-    dtype: str = "float32",
-    workspace_gb: float = 4.0,
-    profiles: dict[str, dict[str, list[int]]] | None = None,
-) -> dict[str, Any]:
-    """A single-component plan synthesized for a bare ONNX file — lets
-    `trtc build`/`trtc submit` consume an ONNX directly, no plan file."""
-    record = component_record(
-        name=name or onnx_path.stem,
-        onnx=onnx_path.name,
-        dtype=dtype,
-        workspace_gb=workspace_gb,
-        profiles=profiles or {},
-        onnx_sha256=sha256_file(onnx_path),
-    )
-    return make_plan(bundle=record["name"], tensorrt_version=tensorrt_version, components=[record])
+def read_build_spec(work_dir: Path) -> dict[str, Any]:
+    spec_path = Path(work_dir) / BUILD_SPEC_FILE
+    if not spec_path.exists():
+        raise FileNotFoundError(f"No {BUILD_SPEC_FILE} in {work_dir}")
+    spec = read_json(spec_path)
+    if spec.get("trtc_build_spec") != BUILD_SPEC_VERSION:
+        raise ValueError(f"Unsupported trtc_build_spec version in {spec_path}: {spec.get('trtc_build_spec')!r}")
+    return spec
 
 
-def shape_specs(profiles: dict[str, dict[str, list[int]]]) -> list[str]:
-    """Profiles as `NAME=MIN:OPT:MAX` strings — the CLI/wire encoding."""
-    return [
-        "{}={}".format(name, ":".join("x".join(str(d) for d in ranges[kind]) for kind in ("min", "opt", "max")))
-        for name, ranges in profiles.items()
-    ]
+def write_build_spec(spec: dict[str, Any], work_dir: Path) -> Path:
+    spec_path = Path(work_dir) / BUILD_SPEC_FILE
+    write_json(spec_path, spec)
+    return spec_path
 
 
-def build_params(component: dict[str, Any], tensorrt_version: str) -> dict[str, Any]:
-    """One component of a plan as the flat parameter set a builder job takes."""
-    return {
-        "trt_version": tensorrt_version,
-        "name": component["name"],
-        "dtype": component["dtype"],
-        "workspace_gb": component["workspace_bytes"] / (1 << 30),
-        "shapes": shape_specs(component["profiles"]),
-    }
+def default_spec_for_onnx(onnx_path: Path) -> dict[str, Any]:
+    """A default single-component spec for a bare ONNX with no spec next to
+    it: strongly typed, TensorRT defaults, no profiles. A sibling
+    '<model>.onnx.data' (the usual external-weight-data convention for >2GB
+    models) is picked up automatically."""
+    component: dict[str, Any] = {"onnx": onnx_path.name, "onnx_sha256": sha256_file(onnx_path)}
+    external = onnx_path.with_name(f"{onnx_path.name}.data")
+    if external.exists():
+        component["external_data"] = {external.name: sha256_file(external)}
+    return {"trtc_build_spec": BUILD_SPEC_VERSION, "components": [component]}
 
 
-def assemble_manifest(plan: dict[str, Any], component_manifests: list[dict[str, Any]]) -> dict[str, Any]:
+def resolve_build_target(target: str | Path) -> tuple[Path, dict[str, Any]]:
+    """What `submit` points at: a directory containing trtc_build_spec.json,
+    or a bare .onnx — which uses the spec next to it, or defaults."""
+    target = Path(target)
+    if target.suffix != ".onnx":
+        return target, read_build_spec(target)
+    if not target.exists():
+        raise FileNotFoundError(f"ONNX file not found: {target}")
+    onnx_path = target.resolve()
+    if (onnx_path.parent / BUILD_SPEC_FILE).exists():
+        return onnx_path.parent, read_build_spec(onnx_path.parent)
+    return onnx_path.parent, default_spec_for_onnx(onnx_path)
+
+
+def single_component_spec(component: dict[str, Any]) -> dict[str, Any]:
+    """A spec of one component — the unit a builder job takes."""
+    return {"trtc_build_spec": BUILD_SPEC_VERSION, "components": [component]}
+
+
+def pack_job_tar(spec: dict[str, Any], work_dir: Path) -> bytes:
+    """One builder job as a tar: trtc_build_spec.json with the ONNX (and any
+    external weight data files) it references next to it."""
+    if len(spec["components"]) != 1:
+        raise ValueError(f"A builder job takes exactly one component, got {len(spec['components'])}")
+    component = spec["components"][0]
+    work_dir = Path(work_dir)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        payload = json.dumps(spec, indent=2, sort_keys=True).encode()
+        info = tarfile.TarInfo(BUILD_SPEC_FILE)
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+        for name in (component["onnx"], *component.get("external_data", {})):
+            path = work_dir / name
+            if not path.exists():
+                raise FileNotFoundError(f"Spec references missing file: {path}")
+            archive.add(path, arcname=name)
+    return buffer.getvalue()
+
+
+def assemble_manifest(spec: dict[str, Any], component_manifests: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge per-component build results (each a single-component manifest)
-    back into the plan — multi-component composition is client-side."""
-    by_name = {m["components"][0]["name"]: m for m in component_manifests}
+    back into the spec — multi-component composition is client-side."""
+    by_onnx = {m["components"][0]["onnx"]: m for m in component_manifests}
     components = []
     build: dict[str, Any] | None = None
-    for component in plan["components"]:
-        result = by_name.get(component["name"])
+    for component in spec["components"]:
+        result = by_onnx.get(component["onnx"])
         if result is None:
-            raise ValueError(f"No build result for component {component['name']!r}")
-        built = result["components"][0]
-        components.append({**component, **{k: built[k] for k in ("engine_sha256", "engine_size")}})
+            raise ValueError(f"No build result for component {component['onnx']!r}")
+        components.append(result["components"][0])
         if build is not None and build != result["build"]:
             raise ValueError("Component engines were built in different environments")
         build = result["build"]
-    return {**plan, "components": components, "build": build}
-
-
-def read_plan(work_dir: Path) -> dict[str, Any]:
-    plan_path = Path(work_dir) / PLAN_FILE
-    if not plan_path.exists():
-        raise FileNotFoundError(f"No {PLAN_FILE} in {work_dir}")
-    plan = read_json(plan_path)
-    if plan.get("trtc_plan") != PLAN_VERSION:
-        raise ValueError(f"Unsupported plan version in {plan_path}: {plan.get('trtc_plan')!r}")
-    return plan
+    return {**spec, "components": components, "build": build}
 
 
 def read_manifest(engine_dir: Path) -> dict[str, Any] | None:
@@ -199,10 +179,12 @@ def installed_tensorrt_version() -> str | None:
 
 
 def resolve_tensorrt_version(explicit: str | None = None, *, project_dir: str | Path | None = None) -> str:
-    """The TensorRT version engines must be built with.
+    """The TensorRT version this project expects.
 
     Resolution order: explicit flag > uv.lock pin > installed distribution.
-    The plan records this so the builder installs exactly the same version.
+    Not a build parameter — builder images are prebaked with one TensorRT.
+    It picks which builder image `trtc launch` starts and lets the client
+    refuse a builder baked with something else before submitting.
     """
     if explicit:
         return explicit
@@ -289,11 +271,10 @@ def trt_version_tuple(version: str) -> tuple[int, ...]:
 
 
 def trt_pin_satisfied(pinned: str, installed: str) -> bool:
-    """The installed distribution builds the engines the plan's pin describes.
-
-    Compares the full numeric version, so a '.postN' wheel suffix is ignored
-    but '10.1' is NOT treated as satisfying a '10.13.x' pin."""
-    return trt_version_tuple(pinned) == trt_version_tuple(installed)
+    """The installed TensorRT builds the engines the pin describes. Compares
+    major.minor.patch, so wheel-only '.postN'/build suffixes are ignored but
+    '10.1' is NOT treated as satisfying a '10.13.x' pin."""
+    return trt_version_tuple(pinned)[:3] == trt_version_tuple(installed)[:3]
 
 
 def trt_versions_compatible(built_with: str, installed: str) -> bool:

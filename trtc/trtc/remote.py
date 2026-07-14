@@ -1,7 +1,8 @@
-"""HTTP client for a trtc builder: one ONNX + parameters up, one engine down.
+"""HTTP client for a trtc builder: one job tar up, one engine down.
 
-Multi-component models are composed here, client-side — the builder only ever
-sees single-ONNX jobs. Stdlib only.
+A job tar is trtc_build_spec.json plus the single ONNX (and any external
+weight data files) it references — see trtc.plan.pack_job_tar. Multi-component
+models are composed here, client-side. Stdlib only.
 """
 
 from __future__ import annotations
@@ -40,19 +41,6 @@ def _request(
         return error.code, error.read()
 
 
-def build_query(params: dict[str, Any], output_url: str | None = None) -> str:
-    pairs: list[tuple[str, str]] = [
-        ("trt", params["trt_version"]),
-        ("name", params["name"]),
-        ("dtype", params["dtype"]),
-        ("workspace_gb", str(params["workspace_gb"])),
-    ]
-    pairs += [("shape", shape) for shape in params.get("shapes", [])]
-    if output_url:
-        pairs.append(("output_url", output_url))
-    return urllib.parse.urlencode(pairs)
-
-
 def builder_info(builder_url: str, *, token: str | None = None) -> dict[str, Any]:
     status, body = _request(f"{builder_url.rstrip('/')}/info", token=token)
     if status != 200:
@@ -62,34 +50,27 @@ def builder_info(builder_url: str, *, token: str | None = None) -> dict[str, Any
 
 def submit_build(
     builder_url: str,
-    onnx: str | Path | None = None,
+    job_tar: bytes | None = None,
     *,
-    params: dict[str, Any],
     input_url: str | None = None,
     output_url: str | None = None,
     token: str | None = None,
 ) -> str:
-    """Submit one ONNX for building; returns the job id. Either upload the
-    bytes or point the builder at a presigned GET URL for them."""
-    if (onnx is None) == (input_url is None):
-        raise ValueError("Pass exactly one of onnx or input_url")
-    url = f"{builder_url.rstrip('/')}/builds?{build_query(params, output_url)}"
-    if onnx is not None:
+    """Submit one job tar for building; returns the job id. Either upload the
+    tar bytes or point the builder at a presigned GET URL for them."""
+    if (job_tar is None) == (input_url is None):
+        raise ValueError("Pass exactly one of job_tar or input_url")
+    url = f"{builder_url.rstrip('/')}/builds"
+    if output_url:
+        url += "?" + urllib.parse.urlencode({"output_url": output_url})
+    if job_tar is not None:
         status, body = _request(
-            url,
-            method="POST",
-            data=Path(onnx).read_bytes(),
-            content_type="application/octet-stream",
-            token=token,
-            timeout=600.0,
+            url, method="POST", data=job_tar, content_type="application/x-tar", token=token, timeout=600.0
         )
     else:
         status, body = _request(
-            url,
-            method="POST",
-            data=json.dumps({"input_url": input_url}).encode(),
-            content_type="application/json",
-            token=token,
+            url, method="POST", data=json.dumps({"input_url": input_url}).encode(),
+            content_type="application/json", token=token,
         )
     if status not in (200, 201, 202):
         raise BuilderError(f"Build submission failed ({status}): {body[:500].decode(errors='replace')}")

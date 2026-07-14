@@ -8,36 +8,30 @@ from pathlib import Path
 from typing import Any
 
 from .plan import (
+    BUILD_SPEC_FILE,
     MANIFEST_FILE,
-    plan_for_onnx,
+    assemble_manifest,
+    engine_name,
+    pack_job_tar,
     query_gpu,
+    read_build_spec,
     read_json,
-    read_plan,
+    resolve_build_target,
     resolve_tensorrt_version,
+    single_component_spec,
+    trt_pin_satisfied,
     write_json,
 )
 from .spec import Bundle, load_entry, parse_options
 
 
-def parse_shape_profile(spec: str) -> tuple[str, dict[str, list[int]]]:
-    """'asr=1x512x128:8x512x256:16x512x1024' -> ('asr', {min/opt/max: [...]})"""
-    name, sep, ranges = spec.partition("=")
-    parts = ranges.split(":") if sep else []
-    if not name or len(parts) != 3:
-        raise SystemExit(f"--shape expects NAME=MIN:OPT:MAX with 'x'-separated dims, got {spec!r}")
-    shapes = [[int(dim) for dim in part.split("x")] for part in parts]
-    if len({len(shape) for shape in shapes}) != 1:
-        raise SystemExit(f"--shape {name}: min/opt/max must have the same rank, got {spec!r}")
-    return name, {"min": shapes[0], "opt": shapes[1], "max": shapes[2]}
-
-
-def _load_bundle(args: argparse.Namespace) -> tuple[Bundle, dict[str, Any]]:
+def _load_bundle(args: argparse.Namespace) -> Bundle:
     factory = load_entry(args.entry)
     options = parse_options(args.set or [])
     bundle = factory(*args.weights, **options)
     if not isinstance(bundle, Bundle):
         raise SystemExit(f"Entry {args.entry!r} returned {type(bundle).__name__}, expected trtc.Bundle")
-    return bundle, options
+    return bundle
 
 
 def _resolve_out_dir(explicit: str | None, bundle: Bundle) -> Path:
@@ -48,18 +42,12 @@ def _resolve_out_dir(explicit: str | None, bundle: Bundle) -> Path:
     raise SystemExit("No output directory: pass --out or set Bundle.engine_dir_hint in the entry")
 
 
-def _run_export(bundle: Bundle, options: dict[str, Any], args: argparse.Namespace) -> Path:
+def _run_export(bundle: Bundle, args: argparse.Namespace) -> Path:
     from .export import export_bundle
 
     out_dir = _resolve_out_dir(args.out, bundle)
-    export_bundle(
-        bundle,
-        out_dir,
-        device=args.device,
-        tensorrt_version=resolve_tensorrt_version(args.trt_version),
-        provenance={"entry": args.entry, "weights": list(args.weights), "options": options},
-    )
-    print(f"plan + ONNX written to {out_dir}")
+    export_bundle(bundle, out_dir, device=args.device)
+    print(f"{BUILD_SPEC_FILE} + ONNX written to {out_dir}")
     return out_dir
 
 
@@ -71,35 +59,30 @@ def _finalize(bundle: Bundle, engine_dir: Path) -> None:
 
 
 def cmd_export(args: argparse.Namespace) -> None:
-    bundle, options = _load_bundle(args)
-    _run_export(bundle, options, args)
+    _run_export(_load_bundle(args), args)
 
 
-def _resolve_build_target(args: argparse.Namespace) -> tuple[Path, dict]:
-    """A build/submit target is a plan directory (from `trtc export`), or a
-    bare .onnx for which a single-component plan is synthesized in memory."""
-    target = Path(args.target)
-    if target.suffix != ".onnx":
-        if args.shape or args.name:
-            raise SystemExit("--shape/--name only apply when the target is a bare .onnx file")
-        return target, read_plan(target)
-    if not target.exists():
-        raise SystemExit(f"ONNX file not found: {target}")
-    onnx_path = target.resolve()
-    plan = plan_for_onnx(
-        onnx_path,
-        tensorrt_version=resolve_tensorrt_version(args.trt_version),
-        name=args.name,
-        dtype=args.dtype,
-        workspace_gb=args.workspace_gb,
-        profiles=dict(parse_shape_profile(spec) for spec in (args.shape or [])),
-    )
-    return onnx_path.parent, plan
+def _check_builder_trt(builder: str, *, token: str | None) -> None:
+    """The builder's TensorRT is prebaked, not pickable — before wasting a
+    build, compare it against this project's uv.lock pin (if there is one)
+    and refuse a builder baked with something else."""
+    from .remote import builder_info
+
+    try:
+        pinned = resolve_tensorrt_version(None)
+    except SystemExit:
+        return  # no pin anywhere; whatever the builder has is what you get
+    prebaked = builder_info(builder, token=token).get("tensorrt")
+    if prebaked and not trt_pin_satisfied(pinned, prebaked):
+        raise SystemExit(
+            f"Builder at {builder} is baked with TensorRT {prebaked} but this project pins {pinned}. "
+            "Point at (or `trtc launch`) the builder image built for your pin."
+        )
 
 
-def _submit_plan(
+def _submit_spec(
     builder: str,
-    plan: dict,
+    spec: dict,
     work_dir: Path,
     out_dir: Path,
     *,
@@ -107,105 +90,80 @@ def _submit_plan(
     output_url: str | None = None,
 ) -> dict | None:
     """One builder job per component; the builder itself never sees more than
-    one ONNX at a time. With output_url the builder PUTs the engine there
+    one at a time. With output_url the builder PUTs the engine there
     (single-component only); otherwise engines and the assembled manifest are
     downloaded into out_dir."""
-    from .plan import assemble_manifest, build_params
     from .remote import download_engine, submit_build, wait_for_build
 
-    components = plan["components"]
+    components = spec["components"]
     if output_url is not None and len(components) != 1:
         raise SystemExit(
             f"--output-url takes a single engine but this target has {len(components)} components; "
             "omit it to download engines locally."
         )
+    _check_builder_trt(builder, token=token)
 
     results = []
     for component in components:
-        job_id = submit_build(
-            builder,
-            work_dir / component["onnx"],
-            params=build_params(component, plan["tensorrt_version"]),
-            output_url=output_url,
-            token=token,
-        )
-        print(f"submitted {component['name']} as job {job_id}")
+        job_tar = pack_job_tar(single_component_spec(component), work_dir)
+        job_id = submit_build(builder, job_tar, output_url=output_url, token=token)
+        print(f"submitted {component['onnx']} as job {job_id}")
         job = wait_for_build(builder, job_id, token=token)
         if job["state"] != "succeeded":
-            raise SystemExit(f"remote build of {component['name']} failed: {job.get('error', 'see builder log')}")
+            raise SystemExit(f"remote build of {component['onnx']} failed: {job.get('error', 'see builder log')}")
         if output_url is not None:
             continue  # builder uploaded the engine; nothing to download or assemble
         if not job.get("result"):
-            raise SystemExit(f"builder returned no build result for {component['name']}")
-        download_engine(builder, job_id, out_dir / component["engine"], token=token)
+            raise SystemExit(f"builder returned no build result for {component['onnx']}")
+        download_engine(builder, job_id, out_dir / engine_name(component), token=token)
         results.append(job["result"])
 
     if output_url is not None:
         return None
-    manifest = assemble_manifest(plan, results)
+    manifest = assemble_manifest(spec, results)
     write_json(out_dir / MANIFEST_FILE, manifest)
     return manifest
 
 
-def _add_onnx_target_arguments(parser: argparse.ArgumentParser, *, target_optional: bool = False) -> None:
-    target_kwargs = {"nargs": "?", "default": None} if target_optional else {}
-    parser.add_argument("target", help="Plan directory (from `trtc export`) or a bare .onnx file", **target_kwargs)
-    parser.add_argument(
-        "--shape",
-        action="append",
-        metavar="NAME=MIN:OPT:MAX",
-        help="Bare-ONNX: optimization profile per dynamic input, e.g. x=1x80:8x80:16x80 (repeatable)",
-    )
-    parser.add_argument("--name", default=None, help="Bare-ONNX: component name (default: file stem)")
-    parser.add_argument("--dtype", choices=["float16", "float32"], default="float32", help="Bare-ONNX only")
-    parser.add_argument("--workspace-gb", type=float, default=4.0, help="Bare-ONNX only")
-    parser.add_argument("--trt-version", default=None, help="TensorRT pin (default: uv.lock, then installed)")
-
-
 def cmd_compile(args: argparse.Namespace) -> None:
-    bundle, options = _load_bundle(args)
-    out_dir = _run_export(bundle, options, args)
-    _submit_plan(args.builder, read_plan(out_dir), out_dir, out_dir, token=args.token)
+    bundle = _load_bundle(args)
+    out_dir = _run_export(bundle, args)
+    _submit_spec(args.builder, read_build_spec(out_dir), out_dir, out_dir, token=args.token)
     _finalize(bundle, out_dir)
     print(f"compiled {bundle.name}: {out_dir / MANIFEST_FILE}")
 
 
 def cmd_submit(args: argparse.Namespace) -> None:
     if args.target is not None:
-        work_dir, plan = _resolve_build_target(args)
+        try:
+            work_dir, spec = resolve_build_target(args.target)
+        except (ValueError, FileNotFoundError) as error:
+            raise SystemExit(str(error)) from error
         if args.output_url:
-            _submit_plan(args.builder, plan, work_dir, work_dir, token=args.token, output_url=args.output_url)
+            _submit_spec(args.builder, spec, work_dir, work_dir, token=args.token, output_url=args.output_url)
             print(f"engine uploaded to {args.output_url}")
         else:
             out_dir = Path(args.out) if args.out else work_dir
-            _submit_plan(args.builder, plan, work_dir, out_dir, token=args.token)
+            _submit_spec(args.builder, spec, work_dir, out_dir, token=args.token)
             print(f"engines + {MANIFEST_FILE} written to {out_dir}")
         return
 
-    # Presigned input: the builder pulls one ONNX from input_url; with
+    # Presigned input: the builder pulls one job tar from input_url; with
     # output_url it PUTs the engine there, otherwise --out downloads it.
     from .remote import download_engine, submit_build, wait_for_build
 
     if not args.input_url:
-        raise SystemExit("Pass a target (plan dir or .onnx) or --input-url")
+        raise SystemExit(f"Pass a target (spec dir or .onnx) or --input-url (a job tar: {BUILD_SPEC_FILE} + ONNX)")
     if not args.output_url and not args.out:
         raise SystemExit("Presigned input needs --output-url (builder uploads) or --out (client downloads)")
-    params = {
-        "trt_version": resolve_tensorrt_version(args.trt_version),
-        "name": args.name or "model",
-        "dtype": args.dtype,
-        "workspace_gb": args.workspace_gb,
-        "shapes": args.shape or [],
-    }
-    job_id = submit_build(
-        args.builder, params=params, input_url=args.input_url, output_url=args.output_url, token=args.token
-    )
+    _check_builder_trt(args.builder, token=args.token)
+    job_id = submit_build(args.builder, input_url=args.input_url, output_url=args.output_url, token=args.token)
     print(f"submitted build {job_id}")
     job = wait_for_build(args.builder, job_id, token=args.token)
     if job["state"] != "succeeded":
         raise SystemExit(f"remote build failed: {job.get('error', 'see builder log')}")
     if not args.output_url:
-        dest = Path(args.out) / f"{params['name']}.engine"
+        dest = Path(args.out) / engine_name(job["spec"]["components"][0])
         download_engine(args.builder, job_id, dest, token=args.token)
         print(f"engine downloaded to {dest}")
 
@@ -232,12 +190,12 @@ def cmd_launch(args: argparse.Namespace) -> None:
 def cmd_inspect(args: argparse.Namespace) -> None:
     path = Path(args.path)
     if path.is_dir():
-        for candidate in (path / MANIFEST_FILE, path / "plan.json"):
+        for candidate in (path / MANIFEST_FILE, path / BUILD_SPEC_FILE):
             if candidate.exists():
                 path = candidate
                 break
         else:
-            raise SystemExit(f"No plan.json or {MANIFEST_FILE} in {path}")
+            raise SystemExit(f"No {BUILD_SPEC_FILE} or {MANIFEST_FILE} in {path}")
     print(json.dumps(read_json(path), indent=2, sort_keys=True))
 
 
@@ -257,14 +215,15 @@ def _add_entry_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--set", action="append", metavar="KEY=VALUE", help="Bundle option override (repeatable)")
     parser.add_argument("--out", default=None, help="Output directory (default: bundle's engine_dir_hint)")
     parser.add_argument("--device", default="cuda", help="Device for export tracing (default: cuda)")
-    parser.add_argument("--trt-version", default=None, help="TensorRT pin (default: installed tensorrt-cu12)")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="trtc", description="Compile PyTorch models to TensorRT engines.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    export_parser = subparsers.add_parser("export", help="Model -> ONNX + plan.json (needs the project env)")
+    export_parser = subparsers.add_parser(
+        "export", help=f"Model -> ONNX + {BUILD_SPEC_FILE} (needs the project env)"
+    )
     _add_entry_arguments(export_parser)
     export_parser.set_defaults(handler=cmd_export)
 
@@ -274,11 +233,17 @@ def main(argv: list[str] | None = None) -> None:
     compile_parser.add_argument("--token", default=None, help="Builder auth token")
     compile_parser.set_defaults(handler=cmd_compile)
 
-    submit_parser = subparsers.add_parser("submit", help="Send a plan dir or bare ONNX to a builder")
-    _add_onnx_target_arguments(submit_parser, target_optional=True)  # presigned-URL mode has no local target
+    submit_parser = subparsers.add_parser("submit", help="Send a build spec dir or bare ONNX to a builder")
+    submit_parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,  # presigned-URL mode has no local target
+        help=f"Directory containing {BUILD_SPEC_FILE}, or a bare .onnx "
+        "(uses the spec next to it, or defaults if there is none)",
+    )
     submit_parser.add_argument("--builder", required=True, help="Builder URL")
     submit_parser.add_argument("--token", default=None, help="Builder auth token")
-    submit_parser.add_argument("--input-url", default=None, help="Presigned GET URL of a plan tarball (instead of upload)")
+    submit_parser.add_argument("--input-url", default=None, help="Presigned GET URL of a job tar (instead of upload)")
     submit_parser.add_argument("--output-url", default=None, help="Presigned PUT URL the builder uploads engines to")
     submit_parser.add_argument("--out", default=None, help="Download engines here when no --output-url is set")
     submit_parser.set_defaults(handler=cmd_submit)
@@ -298,7 +263,9 @@ def main(argv: list[str] | None = None) -> None:
     launch_parser.add_argument("--query", default=None, help="Full vast.ai offer query (overrides --gpu/--disk)")
     launch_parser.set_defaults(handler=cmd_launch)
 
-    inspect_parser = subparsers.add_parser("inspect", help="Pretty-print a plan.json / manifest.json / engine dir")
+    inspect_parser = subparsers.add_parser(
+        "inspect", help=f"Pretty-print a {BUILD_SPEC_FILE} / {MANIFEST_FILE} / engine dir"
+    )
     inspect_parser.add_argument("path")
     inspect_parser.set_defaults(handler=cmd_inspect)
 

@@ -23,6 +23,12 @@
         };
         n2c = nix2container.packages.${system}.nix2container;
         cudart = pkgs.cudaPackages.cuda_cudart;
+        # Just libcudart, without the nixpkgs cuda package's setup-hook and
+        # header baggage (patchelf, cccl, ...) leaking into the image closure.
+        cudartLibs = pkgs.runCommand "cudart-libs" {} ''
+          mkdir -p $out/lib
+          cp -a ${pkgs.lib.getLib cudart}/lib/libcudart.so* $out/lib/
+        '';
 
         # The trtc release version: reported by /info and part of the image
         # tags (1.0.0-trt10.13).
@@ -62,15 +68,19 @@
             src = pkgs.fetchurl {inherit (pin) url sha256;};
             nativeBuildInputs = [pkgs.zstd pkgs.patchelf]; # 11.1 ships .tar.zst; tar autodetects
             sourceRoot = "TensorRT-${pin.version}";
+            outputs = ["out" "dev"]; # headers compile the binaries, never ship
             dontConfigure = true;
             dontBuild = true;
             installPhase = ''
-              mkdir -p $out/lib
-              cp -a include $out/include
+              mkdir -p $out/lib $dev
+              cp -a include $dev/include
+              # The 1.7GB *_win resource only serves runtime_platform
+              # WINDOWS_AMD64 cross-builds; asking for that fails loudly.
+              rm -f lib/*_win.so*
               cp -a lib/*.so* $out/lib/
               for lib in $out/lib/libnvinfer.so.* $out/lib/libnvonnxparser.so.*; do
                 [ -L "$lib" ] || patchelf --set-rpath \
-                  '$ORIGIN:${pkgs.lib.getLib cudart}/lib:${driverLibraryPath}' "$lib"
+                  '$ORIGIN:${cudartLibs}/lib:${driverLibraryPath}' "$lib"
               done
             '';
             dontFixup = true; # manylinux binaries; only the targeted rpath above
@@ -95,7 +105,9 @@
           cmakeFlags = ["-DTRTC_WITH_TENSORRT=OFF" "-DTRTC_VERSION=${trtcVersion}"];
         };
 
-        # Both binaries, linked against one pinned TensorRT.
+        # trtc-server (self-contained: serving + its own build subcommand for
+        # jobs) and the standalone trtc-build, linked against one pinned
+        # TensorRT.
         serverFor = pin: let
           tensorrt = tensorrtFor pin;
         in
@@ -107,7 +119,7 @@
             buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive cudart];
             cmakeFlags = [
               "-DTRTC_VERSION=${trtcVersion}"
-              "-DTENSORRT_INCLUDE_DIR=${tensorrt}/include"
+              "-DTENSORRT_INCLUDE_DIR=${tensorrt.dev}/include"
               "-DTENSORRT_NVINFER=${tensorrt}/lib/libnvinfer.so"
               "-DTENSORRT_NVONNXPARSER=${tensorrt}/lib/libnvonnxparser.so"
               # trtc-build finds its TensorRT in the store forever, no
@@ -155,7 +167,7 @@
                 mode = "0755";
               }
             ];
-            layers = [(n2c.buildLayer {deps = [(tensorrtFor pin) (pkgs.lib.getLib cudart)];})];
+            layers = [(n2c.buildLayer {deps = [(tensorrtFor pin) cudartLibs];})];
             config = {
               Env = [
                 "PATH=/bin"
@@ -173,6 +185,36 @@
               ExposedPorts."8080/tcp" = {};
               Volumes."/data" = {};
             };
+          };
+
+        # One-shot local build without composing a spec directory first:
+        #   nix run github:dialohq/trtc#build-10.13 -- spec.json model.onnx [data files...] [--out DIR]
+        # Files are staged (symlinked) into a scratch dir under the canonical
+        # names and handed to the pinned `trtc-server build`.
+        buildAppFor = pin:
+          pkgs.writeShellApplication {
+            name = "trtc-build-once";
+            runtimeInputs = [pkgs.coreutils];
+            text = ''
+              if [ "$#" -lt 2 ]; then
+                echo "usage: nix run .#build-<trt> -- <spec.json> <model.onnx> [onnx data files...] [--out DIR]" >&2
+                exit 2
+              fi
+              out="$PWD"
+              spec=""
+              files=()
+              while [ "$#" -gt 0 ]; do
+                case "$1" in
+                  --out) out="$2"; shift 2 ;;
+                  *) if [ -z "$spec" ]; then spec="$1"; else files+=("$1"); fi; shift ;;
+                esac
+              done
+              work="$(mktemp -d)"
+              trap 'rm -rf "$work"' EXIT
+              cp "$spec" "$work/trtc_build_spec.json"
+              for f in "''${files[@]}"; do ln -s "$(realpath "$f")" "$work/$(basename "$f")"; done
+              exec ${serverFor pin}/bin/trtc-build "$work" --out "$out"
+            '';
           };
 
         # "10.13" -> "trtc-builder-trt10-13" (flake attr names can't have dots)
@@ -242,7 +284,18 @@
           // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-server-trt" v) (serverFor pin))
           tensorrtPins
           // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair (attrName "trtc-builder-trt" v) (imageFor pin))
+          tensorrtPins
+          // pkgs.lib.mapAttrs' (v: pin: pkgs.lib.nameValuePair "build-${v}" (buildAppFor pin))
           tensorrtPins;
+
+        # `nix run .#build-10.13` unquoted: nix splits attrpaths on dots, so
+        # mirror the build apps as nested attrs (build-10.13 -> build-10 . 13).
+        legacyPackages = builtins.foldl' pkgs.lib.recursiveUpdate {} (pkgs.lib.mapAttrsToList (
+            v: pin: let
+              parts = pkgs.lib.splitString "." v;
+            in {"build-${builtins.elemAt parts 0}"."${builtins.elemAt parts 1}" = buildAppFor pin;}
+          )
+          tensorrtPins);
       }
     );
 }

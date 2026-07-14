@@ -74,9 +74,11 @@
             installPhase = ''
               mkdir -p $out/lib $dev
               cp -a include $dev/include
-              # The 1.7GB *_win resource only serves runtime_platform
-              # WINDOWS_AMD64 cross-builds; asking for that fails loudly.
-              rm -f lib/*_win.so*
+              # The *_win* builder resources (monolithic in TRT 10.13, one
+              # per SM arch from 10.16 on — gigabytes of them) only serve
+              # runtime_platform WINDOWS_AMD64 cross-builds; asking for that
+              # fails loudly.
+              rm -f lib/*_win*
               cp -a lib/*.so* $out/lib/
               for lib in $out/lib/libnvinfer.so.* $out/lib/libnvonnxparser.so.*; do
                 [ -L "$lib" ] || patchelf --set-rpath \

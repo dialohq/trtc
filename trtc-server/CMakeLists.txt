@@ -31,6 +31,13 @@ if(TRTC_WITH_TENSORRT)
   target_compile_definitions(trtc-server PRIVATE TRTC_WITH_TENSORRT)
   target_include_directories(trtc-server PRIVATE ${TENSORRT_INCLUDE_DIR})
   target_link_libraries(trtc-server PRIVATE ${TENSORRT_NVINFER} ${TENSORRT_NVONNXPARSER})
+
+  # The same build, as its own standalone binary.
+  add_executable(trtc-build build_standalone.cpp build.cpp)
+  target_include_directories(trtc-build PRIVATE ${TENSORRT_INCLUDE_DIR})
+  target_link_libraries(trtc-build PRIVATE OpenSSL::Crypto nlohmann_json::nlohmann_json
+                                           ${TENSORRT_NVINFER} ${TENSORRT_NVONNXPARSER} ${CMAKE_DL_LIBS})
+  install(TARGETS trtc-build)
 endif()
 
 install(TARGETS trtc-server)

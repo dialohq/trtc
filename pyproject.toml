@@ -1,11 +1,11 @@
 [project]
 name = "trtc-workspace"
 version = "0.1.0"
-description = "Workspace root for trtc and its builder deployment member"
+description = "Workspace root for the trtc client package"
 requires-python = ">=3.11"
 
 [tool.uv.workspace]
-members = ["trtc", "trtc-builder"]
+members = ["trtc"]
 
 [tool.uv.sources]
 trtc = { workspace = true }

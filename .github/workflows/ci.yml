@@ -11,70 +11,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - name: Run tests
-        working-directory: trtc
-        run: uv run --project .. --package trtc python -m unittest discover -s tests -v
+      - name: Run client tests
+        run: uv run --package trtc python -m unittest discover -s trtc/tests -v
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v35
+        with:
+          nix_conf: experimental-features = nix-command flakes
+
+      - name: Build the C++ broker
+        run: nix build .#trtc-broker --print-build-logs
+
+      - name: End-to-end (real broker + real client, stubbed TensorRT build)
+        run: >
+          TRTC_SERVER_BIN=$PWD/result/bin/trtc-server
+          uv run --package trtc python -m unittest discover -s trtc-server/tests -v
 
   builder-image:
-    # One builder image per supported TensorRT version: engines are
-    # TRT-version-locked, so a shared registry holds trt<major.minor> tags and
-    # clients select by their plan's pin. The per-version pin is applied here
-    # (uv add + relock, never committed); the repo lock stays the dev default.
+    # One builder image per supported TensorRT version, tagged
+    # trt<major.minor>. The version list is the tensorrtPins attrset in
+    # flake.nix — nowhere else.
     if: github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        tensorrt: ["10.13.3.9.post1", "11.1.0.106", "10.16.1.11"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v35
         with:
-          nix_conf: |
-            experimental-features = nix-command flakes ca-derivations
-            sandbox = false
-            keep-env-derivations = true
-            keep-outputs = true
+          nix_conf: experimental-features = nix-command flakes
 
       - name: Cache nix store
         uses: nix-community/cache-nix-action@v6
         with:
-          primary-key: trtc-builder-${{ matrix.tensorrt }}-${{ hashFiles('uv.lock', 'flake.lock', 'flake.nix', '**/pyproject.toml') }}
-          restore-prefixes-first-match: trtc-builder-${{ matrix.tensorrt }}-
-          gc-max-store-size-linux: 16G
+          primary-key: trtc-builder-${{ hashFiles('flake.lock', 'flake.nix', 'trtc-server/**') }}
+          restore-prefixes-first-match: trtc-builder-
+          gc-max-store-size-linux: 48G
           purge: true
-          purge-prefixes: trtc-builder-${{ matrix.tensorrt }}-
+          purge-prefixes: trtc-builder-
           purge-created: 0
           purge-primary-key: never
 
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Pin TensorRT for this matrix entry
+      - name: Build and push all builder images
         run: |
-          uv add --package trtc --optional builder "tensorrt-cu12==${{ matrix.tensorrt }}"
-          uv lock
-
-      - name: Build image
-        run: |
-          sudo mkdir -p /run/containers /etc/containers
-          sudo chmod 0755 /run/containers
-          echo 'unqualified-search-registries = ["docker.io"]' | sudo tee /etc/containers/registries.conf > /dev/null
-          nix build --option sandbox false .#trtc-builder --print-build-logs
-
-      - name: Push to ghcr.io
-        run: |
-          TRT_MM=$(echo "${{ matrix.tensorrt }}" | cut -d. -f1,2)
-          IMAGE="ghcr.io/${{ github.repository_owner }}/trtc-builder"
-          nix run \
-            --option sandbox false \
-            .#trtc-builder.copyTo -- \
-            --preserve-digests \
-            --dest-creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-            "docker://$IMAGE:trt$TRT_MM"
-          echo "Pushed $IMAGE:trt$TRT_MM" >> $GITHUB_STEP_SUMMARY
+          nix run .#push-builder-images -- \
+            "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "ghcr.io/${{ github.repository_owner }}/trtc-builder"

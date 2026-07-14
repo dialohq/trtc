@@ -38,19 +38,20 @@
         packages = rec {
           default = trtc-builder;
 
-          # The remote builder: a fixed, correct environment — trtc plus the
-          # TensorRT the workspace lock pins (via the trtc-builder member's
-          # trtc[builder] dependency). Pinned to one TensorRT version like a
-          # derivation; a plan pinning a different version fails the job. CI
-          # builds one image per supported version (see the workflow matrix),
-          # tagged trt<major.minor>. Run:
+          # The remote builder: a fixed, correct environment — exactly the
+          # trtc-server workspace member and its locked dependencies (trtc for
+          # the shared plan contract, plus the TensorRT the workspace lock
+          # pins). Pinned to one TensorRT version like a derivation; a plan
+          # pinning a different version fails the job. CI builds one image per
+          # supported version (see the workflow matrix), tagged
+          # trt<major.minor>. Run:
           #   docker run --gpus all -p 8080:8080 -v trtc-data:/data \
           #       ghcr.io/dialohq/trtc-builder:trt<version>
           trtc-builder = x2container.lib.${system}.uv2container.buildImage {
             name = "trtc-builder";
             src = ./.;
             python = pkgs.python311;
-            members = ["trtc" "trtc-builder"];
+            members = ["trtc" "trtc-server"];
             # Only libstdc++ for the manylinux TRT libs; deliberately NOT nix
             # glibc — host-injected FHS binaries must not resolve a foreign
             # libc ahead of their own.
@@ -65,7 +66,7 @@
                   "PYTHONUNBUFFERED=1"
                   "TRTC_DATA_DIR=/data"
                 ];
-              Cmd = ["python" "-m" "trtc.server.cli" "serve" "--host" "0.0.0.0" "--port" "8080"];
+              Cmd = ["python" "-m" "trtc_server.cli" "serve" "--host" "0.0.0.0" "--port" "8080"];
             };
           };
 

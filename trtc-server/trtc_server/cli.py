@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..plan import MANIFEST_FILE, resolve_build_target, resolve_tensorrt_version
+from trtc.plan import MANIFEST_FILE, resolve_build_target, resolve_tensorrt_version
 
 
 def cmd_build(args: argparse.Namespace) -> None:
@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     build_parser.add_argument("--timing-cache", default=None, help="TensorRT timing cache file")
     build_parser.set_defaults(handler=cmd_build)
 
-    serve_parser = subparsers.add_parser("serve", help="Run the builder server (see trtc/server/app.py for env vars)")
+    serve_parser = subparsers.add_parser("serve", help="Run the builder server (see trtc_server/app.py for env vars)")
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", type=int, default=8080)
     serve_parser.set_defaults(handler=cmd_serve)

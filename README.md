@@ -2,8 +2,10 @@
 
 Compile PyTorch models to TensorRT engines: export locally with your
 project's torch, build remotely on deployment-class hardware, serve with
-manifest-validated engines. The package and its docs live in
-[`trtc/`](trtc/README.md).
+manifest-validated engines. A uv workspace of two packages: the client
+[`trtc/`](trtc/README.md) (docs live there) and the builder
+[`trtc-server/`](trtc-server/README.md) — the builder image is exactly the
+`trtc-server` member installed with its locked dependencies.
 
 ## Consuming
 

@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ..plan import MANIFEST_FILE, query_gpu, read_json, write_json
+from trtc.plan import MANIFEST_FILE, query_gpu, read_json, write_json
 
 
 class BuilderState:
@@ -107,7 +107,7 @@ def _build_command(state: BuilderState, onnx_path: Path, output_dir: Path, param
     # TensorRT this environment does not provide, build._check_trt_version
     # fails the job loudly; use a builder image built for that version instead.
     build_args = [
-        "-m", "trtc.server.cli", "build", str(onnx_path),
+        "-m", "trtc_server.cli", "build", str(onnx_path),
         "--name", params["name"],
         "--dtype", params["dtype"],
         "--workspace-gb", str(params["workspace_gb"]),

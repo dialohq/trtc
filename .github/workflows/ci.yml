@@ -11,9 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - name: Run tests
-        working-directory: trtc
-        run: uv run --project .. --package trtc python -m unittest discover -s tests -v
+      - name: Run trtc (client) tests
+        run: uv run --package trtc python -m unittest discover -s trtc/tests -v
+      - name: Run trtc-server tests
+        # tensorrt is a real dependency of trtc-server but tests stub the
+        # build subprocess; skip installing the multi-GB wheels.
+        run: |
+          uv sync --package trtc-server \
+            --no-install-package tensorrt-cu12 \
+            --no-install-package tensorrt-cu12-bindings \
+            --no-install-package tensorrt-cu12-libs
+          uv run --no-sync --package trtc-server python -m unittest discover -s trtc-server/tests -v
 
   builder-image:
     # One builder image per supported TensorRT version: engines are
@@ -57,7 +65,7 @@ jobs:
 
       - name: Pin TensorRT for this matrix entry
         run: |
-          uv add --package trtc --optional builder "tensorrt-cu12==${{ matrix.tensorrt }}"
+          uv add --package trtc-server "tensorrt-cu12==${{ matrix.tensorrt }}"
           uv lock
 
       - name: Build image

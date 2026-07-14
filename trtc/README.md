@@ -7,16 +7,19 @@ different TensorRT or GPU arch.
 
 ## Client and server
 
-The package splits into two sides with two CLIs and no dependency on each
-other (they share only the plan/manifest contract in `trtc.plan`):
+Two uv workspace packages, one CLI each:
 
-- **`trtc`** (`trtc.client`) — runs where the model code lives: `export`,
-  `submit`, `compile` (= export + submit), `launch`, `inspect`, `info`.
-  Never imports tensorrt.
-- **`trtc-server`** (`trtc.server`) — runs on GPU hardware with the pinned
-  TensorRT: `serve` (the builder HTTP API) and `build` (engines from a plan
-  dir or bare ONNX). Never imports torch or model code. The server builds,
-  end of story.
+- **`trtc`** (this directory; module `trtc`) — runs where the model code
+  lives: `export`, `submit`, `compile` (= export + submit), `launch`,
+  `inspect`, `info`. Zero dependencies, never imports tensorrt. Also carries
+  the shared plan/manifest contract (`trtc.plan`) and the inference runtime
+  (`trtc.runtime`).
+- **`trtc-server`** ([`trtc-server/`](../trtc-server), module `trtc_server`)
+  — runs on GPU hardware with the pinned TensorRT: `serve` (the builder HTTP
+  API) and `build` (engines from a plan dir or bare ONNX). Depends on `trtc`
+  (for the contract) and `tensorrt-cu12`; installing it *is* the builder
+  environment — that's exactly what the image does. Never imports torch or
+  model code. The server builds, end of story.
 
 ## The three stages
 
@@ -55,8 +58,9 @@ uv run trtc-server build model.onnx      # same thing, locally on a GPU box
 
 `ghcr.io/dialohq/trtc-builder` — built by CI from the flake
 (`nix build .#trtc-builder`, x2container). It is a **fixed, correct
-environment**: trtc plus the exact TensorRT the workspace `uv.lock` pins, and
-nothing resolved at runtime. Like a nix derivation, the image is pinned to one
+environment**: the `trtc-server` workspace member and its locked dependencies
+(trtc + the exact TensorRT the workspace `uv.lock` pins), and nothing
+resolved at runtime. Like a nix derivation, the image is pinned to one
 TensorRT version; a plan pinning a different version fails the job loudly (you
 run a builder image built for that version instead). No `uv run --with`, no
 PATH tricks — the venv is either correct or the build fails.

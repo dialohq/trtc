@@ -9,7 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "trtc",
-    "trtc-builder",
+    "trtc-server",
     "trtc-workspace",
 ]
 
@@ -1349,30 +1349,28 @@ version = "0.1.0"
 source = { editable = "trtc" }
 
 [package.optional-dependencies]
-builder = [
-    { name = "tensorrt-cu12" },
-]
 launch = [
     { name = "vastai" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "tensorrt-cu12", marker = "extra == 'builder'" },
-    { name = "vastai", marker = "extra == 'launch'" },
-]
-provides-extras = ["builder", "launch"]
+requires-dist = [{ name = "vastai", marker = "extra == 'launch'" }]
+provides-extras = ["launch"]
 
 [[package]]
-name = "trtc-builder"
+name = "trtc-server"
 version = "0.1.0"
-source = { editable = "trtc-builder" }
+source = { editable = "trtc-server" }
 dependencies = [
-    { name = "trtc", extra = ["builder"] },
+    { name = "tensorrt-cu12" },
+    { name = "trtc" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "trtc", extras = ["builder"], editable = "trtc" }]
+requires-dist = [
+    { name = "tensorrt-cu12" },
+    { name = "trtc", editable = "trtc" },
+]
 
 [[package]]
 name = "trtc-workspace"

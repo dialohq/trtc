@@ -2,5 +2,5 @@
 
 Exports models to ONNX + plan.json with the project's own torch, submits the
 result to a builder over HTTP, and provisions builders. Never imports
-tensorrt — building engines is the server's job (`trtc.server`).
+tensorrt — building engines is the server's job (the `trtc-server` package).
 """

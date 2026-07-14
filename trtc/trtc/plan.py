@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 PLAN_FILE = "plan.json"
 MANIFEST_FILE = "manifest.json"
@@ -50,7 +50,7 @@ def component_record(
     opset: int | None = None,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One component entry of a plan — the unit `trtc build` consumes."""
+    """One component entry of a plan — the unit `trtc-server build` consumes."""
     record: dict[str, Any] = {
         "name": name,
         "onnx": onnx,
@@ -97,7 +97,7 @@ def plan_for_onnx(
     profiles: dict[str, dict[str, list[int]]] | None = None,
 ) -> dict[str, Any]:
     """A single-component plan synthesized for a bare ONNX file — lets
-    `trtc build`/`trtc submit` consume an ONNX directly, no plan file."""
+    `trtc-server build`/`trtc submit` consume an ONNX directly, no plan file."""
     record = component_record(
         name=name or onnx_path.stem,
         onnx=onnx_path.name,
@@ -115,6 +115,51 @@ def shape_specs(profiles: dict[str, dict[str, list[int]]]) -> list[str]:
         "{}={}".format(name, ":".join("x".join(str(d) for d in ranges[kind]) for kind in ("min", "opt", "max")))
         for name, ranges in profiles.items()
     ]
+
+
+def parse_shape_profile(spec: str) -> tuple[str, dict[str, list[int]]]:
+    """'asr=1x512x128:8x512x256:16x512x1024' -> ('asr', {min/opt/max: [...]})
+
+    The inverse of shape_specs: decodes one CLI/wire `NAME=MIN:OPT:MAX` string."""
+    name, sep, ranges = spec.partition("=")
+    parts = ranges.split(":") if sep else []
+    if not name or len(parts) != 3:
+        raise ValueError(f"--shape expects NAME=MIN:OPT:MAX with 'x'-separated dims, got {spec!r}")
+    shapes = [[int(dim) for dim in part.split("x")] for part in parts]
+    if len({len(shape) for shape in shapes}) != 1:
+        raise ValueError(f"--shape {name}: min/opt/max must have the same rank, got {spec!r}")
+    return name, {"min": shapes[0], "opt": shapes[1], "max": shapes[2]}
+
+
+def resolve_build_target(
+    target: str | Path,
+    *,
+    tensorrt_version: str,
+    name: str | None = None,
+    dtype: str = "float32",
+    workspace_gb: float = 4.0,
+    shapes: Sequence[str] = (),
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve what `build`/`submit` point at: a plan directory (from
+    `trtc export`), or a bare .onnx for which a single-component plan is
+    synthesized in memory."""
+    target = Path(target)
+    if target.suffix != ".onnx":
+        if shapes or name:
+            raise ValueError("--shape/--name only apply when the target is a bare .onnx file")
+        return target, read_plan(target)
+    if not target.exists():
+        raise FileNotFoundError(f"ONNX file not found: {target}")
+    onnx_path = target.resolve()
+    plan = plan_for_onnx(
+        onnx_path,
+        tensorrt_version=tensorrt_version,
+        name=name,
+        dtype=dtype,
+        workspace_gb=workspace_gb,
+        profiles=dict(parse_shape_profile(spec) for spec in shapes),
+    )
+    return onnx_path.parent, plan
 
 
 def build_params(component: dict[str, Any], tensorrt_version: str) -> dict[str, Any]:

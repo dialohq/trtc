@@ -2,7 +2,7 @@
 
 One job = one ONNX + build parameters in the query string = one engine back.
 The server knows nothing about models, bundles, or plans — multi-component
-compilation is N jobs, composed client-side. Each job runs `trtc build` in
+compilation is N jobs, composed client-side. Each job runs `trtc-server build` in
 this server's own interpreter, which is expected to be a correct, fixed
 environment (trtc + the pinned tensorrt already installed, like a nix
 derivation). There is no per-job dependency resolution: a plan pinning a
@@ -41,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .plan import MANIFEST_FILE, query_gpu, read_json, write_json
+from ..plan import MANIFEST_FILE, query_gpu, read_json, write_json
 
 
 class BuilderState:
@@ -101,13 +101,13 @@ def parse_build_params(query: dict[str, list[str]]) -> dict[str, Any]:
 
 
 def _build_command(state: BuilderState, onnx_path: Path, output_dir: Path, params: dict[str, Any]) -> list[str]:
-    # Runs `trtc build` in this server's own interpreter. The builder is a
+    # Runs `trtc-server build` in this server's own interpreter. The builder is a
     # correct, fixed environment (trtc + the pinned tensorrt already installed,
     # like a nix derivation) — no per-job resolution. If the plan pins a
     # TensorRT this environment does not provide, build._check_trt_version
     # fails the job loudly; use a builder image built for that version instead.
     build_args = [
-        "-m", "trtc.cli", "build", str(onnx_path),
+        "-m", "trtc.server.cli", "build", str(onnx_path),
         "--name", params["name"],
         "--dtype", params["dtype"],
         "--workspace-gb", str(params["workspace_gb"]),

@@ -5,6 +5,19 @@ project's torch; the engine build runs on deployment-class hardware with the
 TensorRT version your lock pins; the runtime refuses engines built for a
 different TensorRT or GPU arch.
 
+## Client and server
+
+The package splits into two sides with two CLIs and no dependency on each
+other (they share only the plan/manifest contract in `trtc.plan`):
+
+- **`trtc`** (`trtc.client`) — runs where the model code lives: `export`,
+  `submit`, `compile` (= export + submit), `launch`, `inspect`, `info`.
+  Never imports tensorrt.
+- **`trtc-server`** (`trtc.server`) — runs on GPU hardware with the pinned
+  TensorRT: `serve` (the builder HTTP API) and `build` (engines from a plan
+  dir or bare ONNX). Never imports torch or model code. The server builds,
+  end of story.
+
 ## The three stages
 
 | stage | needs | produces |
@@ -30,12 +43,12 @@ Or split it: `trtc export ... --out ./work`, then `trtc submit ./work ...`.
 
 ## I have an ONNX file already
 
-No bundle, no plan file — point build or submit at it:
+No bundle, no plan file — point submit (or a local `trtc-server build`) at it:
 
 ```sh
 uv run trtc submit model.onnx --builder http://builder:8080 --out . \
     --shape input=1x80:8x80:16x80        # min:opt:max per dynamic input
-uv run trtc build model.onnx             # same thing, locally on a GPU box
+uv run trtc-server build model.onnx      # same thing, locally on a GPU box
 ```
 
 ## The builder

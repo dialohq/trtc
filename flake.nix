@@ -65,7 +65,7 @@
                   "PYTHONUNBUFFERED=1"
                   "TRTC_DATA_DIR=/data"
                 ];
-              Cmd = ["python" "-m" "trtc.cli" "serve" "--host" "0.0.0.0" "--port" "8080"];
+              Cmd = ["python" "-m" "trtc.server.cli" "serve" "--host" "0.0.0.0" "--port" "8080"];
             };
           };
 

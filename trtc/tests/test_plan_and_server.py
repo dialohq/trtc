@@ -10,7 +10,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from trtc.build import _engine_cache_key
+from trtc.server.build import _engine_cache_key
 from trtc.plan import (
     PLAN_FILE,
     assemble_manifest,
@@ -21,8 +21,8 @@ from trtc.plan import (
     trt_versions_compatible,
     write_json,
 )
-from trtc.remote import download_engine, submit_build, wait_for_build
-from trtc.server import BuilderState, make_handler
+from trtc.client.remote import download_engine, submit_build, wait_for_build
+from trtc.server.app import BuilderState, make_handler
 
 
 def _fake_plan_dir(tmp_dir: Path) -> Path:
@@ -135,15 +135,15 @@ class BareOnnxTests(unittest.TestCase):
     CLI/wire string encoding."""
 
     def test_parse_shape_profile_roundtrip(self):
-        from trtc.cli import parse_shape_profile
+        from trtc.plan import parse_shape_profile
 
         name, profile = parse_shape_profile("asr=1x512x128:8x512x256:16x512x1024")
         self.assertEqual(name, "asr")
         self.assertEqual(profile, {"min": [1, 512, 128], "opt": [8, 512, 256], "max": [16, 512, 1024]})
         self.assertEqual(shape_specs({name: profile}), ["asr=1x512x128:8x512x256:16x512x1024"])
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ValueError):
             parse_shape_profile("asr=1x2:3x4")
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(ValueError):
             parse_shape_profile("noshapes")
 
     def test_plan_for_onnx_and_job_params(self):
@@ -197,7 +197,7 @@ class ServerRoundTripTests(unittest.TestCase):
         # plus the single-component manifest trtc build would write.
         result_json = json.dumps(self.RESULT).replace('"', '\\"')
         self._build_command = patch(
-            "trtc.server._build_command",
+            "trtc.server.app._build_command",
             lambda state, onnx_path, output_dir, params: [
                 "sh", "-c",
                 f'cp {onnx_path} {output_dir}/{params["name"]}.engine'
@@ -213,7 +213,7 @@ class ServerRoundTripTests(unittest.TestCase):
         threading.Thread(target=self._drain_queue, daemon=True).start()
 
     def _drain_queue(self):
-        from trtc.server import _run_job
+        from trtc.server.app import _run_job
 
         while True:
             job_id = self.state.queue.get()
@@ -231,7 +231,7 @@ class ServerRoundTripTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 401)
 
     def test_rejects_traversal_name(self):
-        from trtc.server import parse_build_params
+        from trtc.server.app import parse_build_params
 
         with self.assertRaises(ValueError):
             parse_build_params({"trt": ["10.13.3.9.post1"], "name": ["../../etc/passwd"]})

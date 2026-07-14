@@ -22,7 +22,8 @@ builder = ["tensorrt-cu12"]
 launch = ["vastai"]
 
 [project.scripts]
-trtc = "trtc.cli:main"
+trtc = "trtc.client.cli:main"
+trtc-server = "trtc.server.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["trtc*"]

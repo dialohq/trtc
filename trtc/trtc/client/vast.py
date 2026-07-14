@@ -53,7 +53,7 @@ def create_instance(offer: int, *, image: str, disk: int, env: str, login: str |
     # Args-launch mode: run the image's server directly. Without --args, vast
     # injects its own ssh/jupyter entrypoint and ignores the image CMD, so the
     # builder never starts. Keep --args last (it consumes the rest of the line).
-    args += ["--entrypoint", "python", "--args", "-m", "trtc.cli", "serve",
+    args += ["--entrypoint", "python", "--args", "-m", "trtc.server.cli", "serve",
              "--host", "0.0.0.0", "--port", str(BUILDER_PORT)]
     result = _vastai(args)
     if result.returncode != 0:

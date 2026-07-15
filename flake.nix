@@ -67,9 +67,9 @@
         # (libnvinfer_builder_resource), libcudart, and libcuda (host driver)
         # by bare soname — bake all of that into libnvinfer's RUNPATH so no
         # LD_LIBRARY_PATH is ever needed, in the image or out of it.
-        tensorrtFor = pin: arch:
+        tensorrtFor = pin:
           pkgs.stdenv.mkDerivation {
-            pname = "tensorrt${pkgs.lib.optionalString (arch != null) "-sm${arch}"}";
+            pname = "tensorrt";
             inherit (pin) version;
             src = pkgs.fetchurl {inherit (pin) url sha256;};
             nativeBuildInputs = [pkgs.zstd pkgs.patchelf]; # 11.1 ships .tar.zst; tar autodetects
@@ -85,15 +85,6 @@
               # runtime_platform WINDOWS_AMD64 cross-builds; asking for that
               # fails loudly.
               rm -f lib/*_win*
-              ${pkgs.lib.optionalString (arch != null) ''
-              # Single-arch variant: keep only this architecture's builder
-              # resource (no PTX fallback either — this image builds for
-              # sm${arch} and nothing else, and fails loudly elsewhere).
-              for f in lib/libnvinfer_builder_resource*; do
-                case "$f" in *_sm${arch}.so*) ;; *) rm -f "$f" ;; esac
-              done
-              ls lib/libnvinfer_builder_resource_sm${arch}.so* >/dev/null # arch must exist in this TensorRT
-              ''}
               cp -a lib/*.so* $out/lib/
               for lib in $out/lib/libnvinfer.so.* $out/lib/libnvonnxparser.so.*; do
                 [ -L "$lib" ] || patchelf --set-rpath \
@@ -102,6 +93,27 @@
             '';
             dontFixup = true; # manylinux binaries; only the targeted rpath above
           };
+
+        # A single-arch TensorRT: the universal extraction, minus every
+        # builder resource except this architecture's (no PTX fallback either
+        # — the variant builds for sm<arch> and nothing else, and fails
+        # loudly elsewhere). A plain copy: the multi-GB tarball is only ever
+        # decompressed once per version.
+        tensorrtArchFor = pin: arch:
+          pkgs.runCommand "tensorrt-sm${arch}-${pin.version}" {} ''
+            mkdir -p $out/lib
+            cp -a ${tensorrtFor pin}/lib/. $out/lib/
+            chmod u+w $out/lib # cp -a keeps the store's read-only dir mode
+            for f in $out/lib/libnvinfer_builder_resource*; do
+              case "$f" in *_sm${arch}.so*) ;; *) rm -f "$f" ;; esac
+            done
+            ls $out/lib/libnvinfer_builder_resource_sm${arch}.so* >/dev/null # arch must exist in this TensorRT
+          '';
+
+        trtFor = pin: arch:
+          if arch == null
+          then tensorrtFor pin
+          else tensorrtArchFor pin arch;
 
         # The GPU-container contract. libcuda always comes from the HOST
         # driver, injected by the container runtime at these FHS locations
@@ -126,7 +138,7 @@
         # jobs) and the standalone trtc-build, linked against one pinned
         # TensorRT.
         serverFor = pin: arch: let
-          tensorrt = tensorrtFor pin arch;
+          tensorrt = trtFor pin arch;
         in
           pkgs.stdenv.mkDerivation {
             pname = "trtc-server${pkgs.lib.optionalString (arch != null) "-sm${arch}"}";
@@ -136,7 +148,7 @@
             buildInputs = [pkgs.openssl pkgs.nlohmann_json pkgs.httplib pkgs.libarchive cudart];
             cmakeFlags = [
               "-DTRTC_VERSION=${trtcVersion}"
-              "-DTENSORRT_INCLUDE_DIR=${tensorrt.dev}/include"
+              "-DTENSORRT_INCLUDE_DIR=${(tensorrtFor pin).dev}/include"
               "-DTENSORRT_NVINFER=${tensorrt}/lib/libnvinfer.so"
               "-DTENSORRT_NVONNXPARSER=${tensorrt}/lib/libnvonnxparser.so"
               # trtc-build finds its TensorRT in the store forever, no
@@ -184,7 +196,7 @@
                 mode = "0755";
               }
             ];
-            layers = [(n2c.buildLayer {deps = [(tensorrtFor pin arch) cudartLibs];})];
+            layers = [(n2c.buildLayer {deps = [(trtFor pin arch) cudartLibs];})];
             config = {
               Env = [
                 "PATH=/bin"

@@ -43,18 +43,14 @@ jobs:
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v35
         with:
-          nix_conf: experimental-features = nix-command flakes
-
-      - name: Cache nix store
-        uses: nix-community/cache-nix-action@v6
-        with:
-          primary-key: trtc-builder-${{ hashFiles('flake.lock', 'flake.nix', 'trtc-server/**') }}
-          restore-prefixes-first-match: trtc-builder-
-          gc-max-store-size-linux: 48G
-          purge: true
-          purge-prefixes: trtc-builder-
-          purge-created: 0
-          purge-primary-key: never
+          # No store cache: the TRT tars + layers (~50GB) can never fit
+          # GitHub's 10GB repo cache, so saves evict immediately and only
+          # cost minutes. max-jobs overlaps the three tarball extractions
+          # and the C++ builds.
+          nix_conf: |
+            experimental-features = nix-command flakes
+            max-jobs = 4
+            cores = 0
 
       - name: Build and push all builder images
         run: |

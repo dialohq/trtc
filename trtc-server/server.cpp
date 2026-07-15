@@ -16,6 +16,9 @@
 //        facts (single-component manifest) once succeeded
 //   GET  /builds/{id}/artifacts        the engine, as raw bytes
 //   GET  /info                         GPU facts, versions, cache location
+//   GET  /openapi.json                 this API as an OpenAPI 3.1 contract; the
+//        builder_config enums are generated from builder_config.hpp's tables,
+//        so they are exactly what this image's TensorRT accepts
 //
 // Environment:
 //   TRTC_TOKEN             optional bearer token required on every request
@@ -43,8 +46,15 @@
 #include <thread>
 
 #include "common.hpp"
+#include "openapi_embedded.hpp"
 
 using namespace trtc;
+
+#ifdef TRTC_WITH_TENSORRT
+namespace trtc {
+json builder_config_vocabulary();  // build.cpp — derived from builder_config.hpp's tables
+}
+#endif
 
 #ifndef TRTC_VERSION
 #define TRTC_VERSION "dev"
@@ -258,6 +268,31 @@ static std::string new_job_id() {
   return id;
 }
 
+// The embedded OpenAPI skeleton (openapi.json) with the live parts filled in:
+// the binary's version, and — when this binary carries TensorRT — the
+// builder_config vocabulary straight from builder_config.hpp's tables. A
+// vocabulary entry with no matching schema property (or vice versa) throws
+// here, so a contract/code mismatch kills the server at startup, loudly.
+static json openapi_spec() {
+  json spec = json::parse(OPENAPI_JSON);
+  spec["info"]["version"] = TRTC_VERSION;
+#ifdef TRTC_WITH_TENSORRT
+  json &props = spec["components"]["schemas"]["BuilderConfig"]["properties"];
+  const json vocab = builder_config_vocabulary();  // named: items() must not outlive it
+  for (const auto &[key, names] : vocab.items()) {
+    if (names.is_null()) {  // option gone in this TensorRT: drop it from the contract
+      props.erase(key);
+      continue;
+    }
+    json &prop = props.at(key);
+    if (prop["type"] == "array") prop["items"]["enum"] = names;
+    else if (prop["type"] == "object") prop["propertyNames"]["enum"] = names;
+    else prop["enum"] = names;
+  }
+#endif
+  return spec;
+}
+
 static void send_json(httplib::Response &response, int code, const json &payload) {
   response.status = code;
   response.set_content(payload.dump(), "application/json");
@@ -312,6 +347,7 @@ int serve_main(int argc, char **argv) {
     }).detach();
 
   httplib::Server server;
+  const std::string openapi = openapi_spec().dump(2);
 
   server.set_pre_routing_handler([&](const httplib::Request &request, httplib::Response &response) {
     state.touch();
@@ -319,6 +355,10 @@ int serve_main(int argc, char **argv) {
       return httplib::Server::HandlerResponse::Unhandled;
     send_json(response, 401, {{"error", "unauthorized"}});
     return httplib::Server::HandlerResponse::Handled;
+  });
+
+  server.Get("/openapi.json", [&](const httplib::Request &, httplib::Response &response) {
+    response.set_content(openapi, "application/json");
   });
 
   server.Get("/info", [&](const httplib::Request &, httplib::Response &response) {

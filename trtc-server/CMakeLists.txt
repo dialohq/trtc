@@ -18,8 +18,15 @@ find_path(HTTPLIB_INCLUDE_DIR httplib.h REQUIRED)
 # no GPU or TensorRT needed).
 option(TRTC_WITH_TENSORRT "link the build subcommand against TensorRT" ON)
 
+# The OpenAPI contract travels inside the binary (GET /openapi.json);
+# builder_config option enums are injected at startup from the tables in
+# builder_config.hpp, so the served contract cannot drift from the code.
+file(READ openapi.json TRTC_OPENAPI_JSON)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS openapi.json)
+configure_file(openapi_embedded.hpp.in openapi_embedded.hpp @ONLY)
+
 add_executable(trtc-server main.cpp server.cpp)
-target_include_directories(trtc-server PRIVATE ${HTTPLIB_INCLUDE_DIR})
+target_include_directories(trtc-server PRIVATE ${HTTPLIB_INCLUDE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(trtc-server PRIVATE OpenSSL::SSL OpenSSL::Crypto nlohmann_json::nlohmann_json
                                           LibArchive::LibArchive Threads::Threads ${CMAKE_DL_LIBS})
 

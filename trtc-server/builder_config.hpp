@@ -123,6 +123,11 @@ inline const std::map<std::string, nvinfer1::TilingOptimizationLevel> TILING_LEV
 
 #undef E
 
+// The tables above as plain data — server.cpp embeds them into the served
+// OpenAPI contract (/openapi.json) without touching TensorRT headers.
+// Defined in build.cpp; a new table here must be added there too.
+json builder_config_vocabulary();
+
 // 4294967296, "4G", "512M" or "1.5G" -> bytes.
 inline int64_t parse_size(const json &value, const std::string &context) {
   if (value.is_number_integer()) return value;

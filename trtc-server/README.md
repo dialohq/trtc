@@ -85,7 +85,27 @@ GET  /builds/{id}[?log_offset=N]            status + incremental log; "result"
                                             holds the manifest once succeeded
 GET  /builds/{id}/artifacts                 the engine, raw bytes
 GET  /info                                  GPU facts, trtc + TensorRT versions
+GET  /openapi.json                          this API, as an OpenAPI 3.1 contract
 ```
+
+### The OpenAPI contract
+
+[`openapi.json`](openapi.json) is the static skeleton — paths, schemas,
+workflow docs. CMake embeds it into the binary, and every server serves it
+at `GET /openapi.json` with the live parts filled in at startup:
+
+- `info.version` — this binary's trtc version;
+- the **`BuilderConfig` option enums** — generated from the same
+  `builder_config.hpp` tables that `apply_builder_config()` looks names up
+  in. A TRT 11 image's contract lists no `FP16` flag and no
+  `quantization_flags` at all; a TRT 10 image's does. The served contract is
+  exactly what that image accepts, by construction.
+
+A vocabulary/skeleton mismatch (a new table not in `openapi.json`, or vice
+versa) kills a TensorRT-linked server at startup — the contract cannot
+silently drift from the code. Point Swagger UI, Redoc, or a client generator
+at the endpoint (or at the checked-in skeleton, which just lacks the
+per-TensorRT enums).
 
 ```sh
 tar cf job.tar trtc_build_spec.json model.onnx model.onnx.data

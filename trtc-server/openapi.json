@@ -1,0 +1,521 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "trtc builder",
+    "version": "dev",
+    "summary": "HTTP job broker that turns ONNX models into TensorRT engines on GPU hardware.",
+    "description": "The builder is a deliberately simple job broker: **one job = one tar = one engine back**.\n\n## Workflow\n\n1. Lay out `trtc_build_spec.json` next to the ONNX file (and any external data files) it references, and tar them up — the exact on-disk layout, no leading directories:\n\n   ```sh\n   tar cf job.tar trtc_build_spec.json model.onnx model.onnx.data\n   ```\n\n2. `POST /builds` with the tar as the body (or JSON `{\"input_url\": …}` pointing at one). You get a job `id` back immediately (`202`).\n\n3. Poll `GET /builds/{id}` until `state` is `succeeded` or `failed`. Pass back the `log_offset` from each response to stream the build log incrementally.\n\n4. Fetch the engine from `GET /builds/{id}/artifacts` — or skip this step by passing `output_url=<presigned PUT URL>` at submission time and the builder uploads the engine there itself.\n\n```sh\ncurl -X POST -H 'Content-Type: application/x-tar' \\\n    --data-binary @job.tar \"http://builder:8080/builds\"\n# -> {\"id\":\"a1b2c3d4e5f6\",\"state\":\"queued\"}\n\ncurl \"http://builder:8080/builds/a1b2c3d4e5f6\"\ncurl -o model.engine \"http://builder:8080/builds/a1b2c3d4e5f6/artifacts\"\n```\n\n## The build spec\n\nEvery build option lives in `trtc_build_spec.json` inside the tar — nothing travels as CLI, query, or header parameters. See the `BuildSpec` schema. When this document is served by a TensorRT-linked builder (`GET /openapi.json`), the `BuilderConfig` option enums are generated from the same tables the build applies — they list exactly what that image's TensorRT accepts.\n\n## Validation, in two layers\n\n1. **Structure, at POST time** — tar members must be regular files with safe single-segment names; the spec must exist, be version 1, single-component, and every file it references must be in the tar. Violations are a `400` with the reason.\n2. **Options, at job start** — only the TensorRT-linked build process knows what its TensorRT supports. A bad option fails the *job* within a second, with the list of known names in the job log and `error`.\n\n## Caching\n\nEngines and TensorRT timing caches persist under `TRTC_DATA_DIR`. Identical jobs (same file hashes + spec + TensorRT + GPU architecture) are served from the engine cache and succeed in seconds.\n\n## Authentication\n\nWhen the server is started with `TRTC_TOKEN` set, every request must carry `Authorization: Bearer <token>`; otherwise no auth is required.",
+    "contact": {
+      "name": "dialo.ai",
+      "url": "https://github.com/dialohq/trtc"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://{host}:{port}",
+      "description": "A running builder instance (e.g. the ghcr.io/dialohq/trtc-builder image).",
+      "variables": {
+        "host": {"default": "localhost"},
+        "port": {"default": "8080"}
+      }
+    }
+  ],
+  "security": [
+    {"bearerAuth": []},
+    {}
+  ],
+  "tags": [
+    {"name": "builds", "description": "Submit build jobs, poll their status, and download engines."},
+    {"name": "server", "description": "Facts about this builder instance."}
+  ],
+  "paths": {
+    "/builds": {
+      "post": {
+        "tags": ["builds"],
+        "operationId": "submitBuild",
+        "summary": "Submit a build job",
+        "description": "Queues a build. The body is either:\n\n- **a job tar** (any non-JSON content type; plain, gzip, or zstd compressed) containing `trtc_build_spec.json` plus the ONNX and external data files it references, side by side, or\n- **JSON** `{\"input_url\": \"<presigned GET URL>\"}` pointing at such a tar. The tar is then fetched (and validated) when the job starts, so a malformed remote tar fails the *job*, not this request.\n\nA tar sent inline is validated and unpacked immediately, so malformed submissions fail this request with a `400` instead of failing the job.\n\nJobs run one at a time, in submission order.",
+        "parameters": [
+          {
+            "name": "output_url",
+            "in": "query",
+            "required": false,
+            "description": "Presigned PUT URL. When the build succeeds, the builder uploads the engine there (`Content-Type: application/octet-stream`) before marking the job `succeeded`. A rejected upload fails the job.",
+            "schema": {"type": "string", "format": "uri"},
+            "example": "https://bucket.s3.amazonaws.com/model.engine?X-Amz-Signature=..."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-tar": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "A job tar: trtc_build_spec.json + the ONNX (+ external data files), no leading directories. Gzip- and zstd-compressed tars are accepted too."
+              }
+            },
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["input_url"],
+                "properties": {
+                  "input_url": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Presigned GET URL of a job tar, fetched when the job starts."
+                  }
+                }
+              },
+              "example": {"input_url": "https://bucket.s3.amazonaws.com/job.tar?X-Amz-Signature=..."}
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Job accepted and queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["id", "state"],
+                  "properties": {
+                    "id": {"$ref": "#/components/schemas/JobId"},
+                    "state": {"type": "string", "const": "queued"}
+                  }
+                },
+                "example": {"id": "a1b2c3d4e5f6", "state": "queued"}
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed submission: not a tar, unsafe member names, missing or invalid trtc_build_spec.json, files referenced by the spec missing from the tar, JSON without input_url, or an empty body.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Error"},
+                "example": {"error": "job tar has no trtc_build_spec.json"}
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/builds/{id}": {
+      "get": {
+        "tags": ["builds"],
+        "operationId": "getBuild",
+        "summary": "Job status and log",
+        "description": "The full job status, including an incremental slice of the build log.\n\nTo stream the log while polling, pass the `log_offset` returned by the previous response: `log` then contains only the bytes appended since, and `log_offset` is the new end-of-log position.\n\nOnce `state` is `succeeded`, `result` holds the build manifest — the spec echoed back plus build facts (engine hash and size, file hashes, TensorRT version, GPU).",
+        "parameters": [
+          {"$ref": "#/components/parameters/JobIdPath"},
+          {
+            "name": "log_offset",
+            "in": "query",
+            "required": false,
+            "description": "Byte offset into the job log to resume from (from the previous response's log_offset).",
+            "schema": {"type": "integer", "minimum": 0, "default": 0}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current job status.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/JobStatus"},
+                "examples": {
+                  "succeeded": {
+                    "summary": "Finished job with its manifest",
+                    "value": {
+                      "id": "a1b2c3d4e5f6",
+                      "state": "succeeded",
+                      "created_at": 1752573000.123,
+                      "started_at": 1752573000.456,
+                      "finished_at": 1752573141.789,
+                      "spec": {"trtc_build_spec": 1, "components": [{"onnx": "model.onnx", "strongly_typed": true}]},
+                      "result": {
+                        "trtc_build_spec": 1,
+                        "components": [
+                          {
+                            "onnx": "model.onnx",
+                            "strongly_typed": true,
+                            "engine": "model.engine",
+                            "onnx_sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                            "engine_sha256": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+                            "engine_size": 104857600
+                          }
+                        ],
+                        "build": {
+                          "tensorrt_version": "10.13.0.35",
+                          "gpu_name": "NVIDIA GeForce RTX 4090",
+                          "compute_capability": "8.9",
+                          "driver_version": "560.35.03",
+                          "used_timing_cache": true
+                        }
+                      },
+                      "log": "built model in 141.2s\n",
+                      "log_offset": 1420
+                    }
+                  },
+                  "failed": {
+                    "summary": "Failed job",
+                    "value": {
+                      "id": "a1b2c3d4e5f6",
+                      "state": "failed",
+                      "created_at": 1752573000.123,
+                      "started_at": 1752573000.456,
+                      "finished_at": 1752573001.001,
+                      "error": "build command exited with 1 (see job log)",
+                      "log": "builder_config.flags: this TensorRT has no 'FP16' (known: DEBUG, ...)\nERROR: build command exited with 1 (see job log)\n",
+                      "log_offset": 512
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {"$ref": "#/components/responses/UnknownJob"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/builds/{id}/artifacts": {
+      "get": {
+        "tags": ["builds"],
+        "operationId": "getBuildArtifacts",
+        "summary": "Download the built engine",
+        "description": "The serialized TensorRT engine, as raw bytes. Available only once the job has succeeded. Engines are only loadable by the same TensorRT version (and, unless built hardware-compatible, GPU architecture) reported by /info.",
+        "parameters": [{"$ref": "#/components/parameters/JobIdPath"}],
+        "responses": {
+          "200": {
+            "description": "The engine.",
+            "content": {
+              "application/octet-stream": {"schema": {"type": "string", "format": "binary"}}
+            }
+          },
+          "409": {
+            "description": "The job has not (or not successfully) produced an engine yet.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Error"},
+                "example": {"error": "job has no engine (state=running)"}
+              }
+            }
+          },
+          "404": {"$ref": "#/components/responses/UnknownJob"},
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/info": {
+      "get": {
+        "tags": ["server"],
+        "operationId": "getInfo",
+        "summary": "Builder facts",
+        "description": "GPU facts, the trtc and TensorRT versions of this image, the number of jobs on disk, and the cache location. Clients use `tensorrt` to refuse a builder that does not match their lock pin.",
+        "responses": {
+          "200": {
+            "description": "Builder facts.",
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Info"},
+                "example": {
+                  "gpu_name": "NVIDIA GeForce RTX 4090",
+                  "compute_capability": "8.9",
+                  "driver_version": "560.35.03",
+                  "trtc": "1.0.0",
+                  "tensorrt": "10.13.0.35",
+                  "jobs": 3,
+                  "cache_dir": "/data/cache"
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": ["server"],
+        "operationId": "getOpenApi",
+        "summary": "This contract",
+        "description": "This OpenAPI document, served by the running binary itself. BuilderConfig option enums are generated from the same compile-time tables the build applies, so they list exactly the names this image's TensorRT accepts — the contract cannot drift from the code.",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document.",
+            "content": {"application/json": {}}
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Required on every request when the server is started with TRTC_TOKEN; no authentication otherwise."
+      }
+    },
+    "parameters": {
+      "JobIdPath": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Job id returned by POST /builds.",
+        "schema": {"$ref": "#/components/schemas/JobId"}
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or wrong bearer token (only when TRTC_TOKEN is set).",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"error": "unauthorized"}
+          }
+        }
+      },
+      "UnknownJob": {
+        "description": "No job with this id.",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"error": "unknown job a1b2c3d4e5f6"}
+          }
+        }
+      }
+    },
+    "schemas": {
+      "JobId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]+$",
+        "description": "Server-assigned job id (lowercase hex).",
+        "example": "a1b2c3d4e5f6"
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "description": "Human-readable reason."}
+        }
+      },
+      "JobStatus": {
+        "type": "object",
+        "required": ["id", "state", "created_at", "log", "log_offset"],
+        "properties": {
+          "id": {"$ref": "#/components/schemas/JobId"},
+          "state": {"type": "string", "enum": ["queued", "running", "succeeded", "failed"]},
+          "created_at": {"type": "number", "description": "Unix time (seconds) the job was accepted."},
+          "started_at": {"type": "number", "description": "Unix time the build started. Absent while queued."},
+          "finished_at": {"type": "number", "description": "Unix time the job reached a terminal state. Absent until then."},
+          "spec": {
+            "$ref": "#/components/schemas/BuildSpec",
+            "description": "The validated build spec from the job tar. For input_url jobs it appears once the tar has been fetched."
+          },
+          "input_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Where the job tar is fetched from (JSON submissions only)."
+          },
+          "output_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Where the engine is uploaded on success, if requested."
+          },
+          "error": {
+            "type": "string",
+            "description": "Why the job failed (failed jobs only). Details are in the log."
+          },
+          "result": {
+            "description": "The build manifest — present once state is succeeded, null or absent otherwise.",
+            "oneOf": [
+              {"$ref": "#/components/schemas/Manifest"},
+              {"type": "null"}
+            ]
+          },
+          "log": {"type": "string", "description": "Job log bytes starting at the requested log_offset."},
+          "log_offset": {
+            "type": "integer",
+            "description": "End-of-log position after this read; pass it back as ?log_offset= to receive only new output next time."
+          }
+        }
+      },
+      "BuildSpec": {
+        "type": "object",
+        "description": "Contents of trtc_build_spec.json. Every build option lives here; the HTTP request carries none.",
+        "required": ["trtc_build_spec", "components"],
+        "properties": {
+          "trtc_build_spec": {"type": "integer", "const": 1, "description": "Spec format version. Must be 1."},
+          "components": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "description": "Exactly one component per builder job.",
+            "items": {"$ref": "#/components/schemas/Component"}
+          }
+        }
+      },
+      "Component": {
+        "type": "object",
+        "required": ["onnx"],
+        "properties": {
+          "onnx": {
+            "type": "string",
+            "description": "File name of the ONNX model inside the tar (single path segment, no directories).",
+            "example": "model.onnx"
+          },
+          "strongly_typed": {
+            "type": "boolean",
+            "default": true,
+            "description": "Network creation flag; precision comes from the ONNX. TensorRT 11 is strongly-typed only."
+          },
+          "onnx_sha256": {
+            "type": "string",
+            "description": "Optional; the build refuses a mismatching ONNX file."
+          },
+          "external_data": {
+            "type": "object",
+            "description": "External weight files of >2GB models: file name -> sha256, or null to skip verification. They live next to the ONNX in the tar.",
+            "additionalProperties": {"type": ["string", "null"]},
+            "example": {"model.onnx.data": null}
+          },
+          "profiles": {
+            "type": "array",
+            "description": "Optimization profiles; each entry maps every dynamic input to min/opt/max shapes. Several entries build a multi-profile engine.",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "required": ["min", "opt", "max"],
+                "properties": {
+                  "min": {"type": "array", "items": {"type": "integer"}},
+                  "opt": {"type": "array", "items": {"type": "integer"}},
+                  "max": {"type": "array", "items": {"type": "integer"}}
+                }
+              }
+            },
+            "example": [{"x": {"min": [1, 8], "opt": [8, 128], "max": [32, 256]}}]
+          },
+          "builder_config": {"$ref": "#/components/schemas/BuilderConfig"}
+        }
+      },
+      "BuilderConfig": {
+        "type": "object",
+        "description": "The tensorrt.IBuilderConfig, as data. Unknown keys or enum members fail the job loudly, listing exactly what this TensorRT supports. When this document is served by a TensorRT-linked builder (GET /openapi.json), every name-taking option below carries an `enum` generated from the same tables the build applies — options this TensorRT removed disappear entirely.",
+        "additionalProperties": false,
+        "properties": {
+          "flags": {
+            "type": "array",
+            "description": "BuilderFlag names to set.",
+            "items": {"type": "string"},
+            "example": ["TF32", "SPARSE_WEIGHTS"]
+          },
+          "memory_pool_limits": {
+            "type": "object",
+            "description": "MemoryPoolType name -> limit.",
+            "propertyNames": {"type": "string"},
+            "additionalProperties": {"$ref": "#/components/schemas/ByteSize"},
+            "example": {"WORKSPACE": "8G"}
+          },
+          "builder_optimization_level": {"type": "integer", "minimum": 0, "maximum": 5},
+          "avg_timing_iterations": {"type": "integer"},
+          "max_aux_streams": {"type": "integer"},
+          "max_num_tactics": {"type": "integer"},
+          "dla_core": {"type": "integer"},
+          "default_device_type": {"type": "string", "description": "DeviceType name."},
+          "engine_capability": {"type": "string", "description": "EngineCapability name."},
+          "hardware_compatibility_level": {"type": "string", "description": "HardwareCompatibilityLevel name."},
+          "profiling_verbosity": {"type": "string", "description": "ProfilingVerbosity name."},
+          "runtime_platform": {"type": "string", "description": "RuntimePlatform name."},
+          "tiling_optimization_level": {"type": "string", "description": "TilingOptimizationLevel name."},
+          "l2_limit_for_tiling": {"$ref": "#/components/schemas/ByteSize"},
+          "tactic_sources": {
+            "type": "array",
+            "description": "TacticSource names; the engine may use only these.",
+            "items": {"type": "string"}
+          },
+          "preview_features": {
+            "type": "object",
+            "description": "PreviewFeature name -> enabled.",
+            "propertyNames": {"type": "string"},
+            "additionalProperties": {"type": "boolean"}
+          },
+          "quantization_flags": {
+            "type": "array",
+            "description": "QuantizationFlag names (TensorRT 10 only; gone in 11).",
+            "items": {"type": "string"}
+          }
+        }
+      },
+      "ByteSize": {
+        "description": "Bytes, as an integer or a \"512M\"/\"8G\"-style string (K/M/G/T suffixes, binary).",
+        "oneOf": [
+          {"type": "integer"},
+          {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?[KMGTkmgt]?$"}
+        ],
+        "example": "8G"
+      },
+      "Manifest": {
+        "type": "object",
+        "description": "The spec echoed back plus build facts, per component.",
+        "required": ["trtc_build_spec", "components", "build"],
+        "properties": {
+          "trtc_build_spec": {"type": "integer", "const": 1},
+          "components": {
+            "type": "array",
+            "items": {
+              "allOf": [
+                {"$ref": "#/components/schemas/Component"},
+                {
+                  "type": "object",
+                  "required": ["engine", "onnx_sha256", "engine_sha256", "engine_size"],
+                  "properties": {
+                    "engine": {"type": "string", "description": "Engine file name (the ONNX stem + \".engine\").", "example": "model.engine"},
+                    "onnx_sha256": {"type": "string", "description": "Actual sha256 of the ONNX that was built."},
+                    "external_data": {
+                      "type": "object",
+                      "description": "Actual sha256 of each external data file.",
+                      "additionalProperties": {"type": "string"}
+                    },
+                    "engine_sha256": {"type": "string"},
+                    "engine_size": {"type": "integer", "description": "Engine size in bytes."}
+                  }
+                }
+              ]
+            }
+          },
+          "build": {
+            "type": "object",
+            "required": ["tensorrt_version", "used_timing_cache"],
+            "properties": {
+              "tensorrt_version": {"type": "string", "example": "10.13.0.35"},
+              "gpu_name": {"type": ["string", "null"]},
+              "compute_capability": {"type": ["string", "null"], "example": "8.9"},
+              "driver_version": {"type": ["string", "null"]},
+              "used_timing_cache": {"type": "boolean"}
+            }
+          }
+        }
+      },
+      "Info": {
+        "type": "object",
+        "required": ["gpu_name", "compute_capability", "driver_version", "trtc", "tensorrt", "jobs", "cache_dir"],
+        "properties": {
+          "gpu_name": {"type": ["string", "null"], "description": "Name of GPU 0, or null when no GPU/driver is visible."},
+          "compute_capability": {"type": ["string", "null"], "description": "CUDA compute capability of GPU 0, e.g. \"8.9\"."},
+          "driver_version": {"type": ["string", "null"], "description": "NVIDIA kernel module version."},
+          "trtc": {"type": "string", "description": "trtc version of this binary."},
+          "tensorrt": {
+            "type": ["string", "null"],
+            "description": "TensorRT version baked into this image (from TRTC_TENSORRT_VERSION). Clients refuse a builder that does not match their lock pin."
+          },
+          "jobs": {"type": "integer", "description": "Number of jobs on disk."},
+          "cache_dir": {"type": "string", "description": "Engine/timing cache location on the server."}
+        }
+      }
+    }
+  }
+}

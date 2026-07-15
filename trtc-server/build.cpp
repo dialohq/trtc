@@ -237,3 +237,33 @@ int build_main(int argc, char **argv) try {
   std::fprintf(stderr, "trtc-server build: %s\n", error.what());
   return 1;
 }
+
+// The builder_config vocabulary as data, for the served OpenAPI contract:
+// the enum lists come from the exact tables apply_builder_config() looks
+// names up in, version guards included. A null value means this TensorRT
+// dropped the option; the contract omits it entirely.
+json trtc::builder_config_vocabulary() {
+  auto names = [](const auto &table) {
+    auto list = json::array();
+    for (const auto &[name, _] : table) list.push_back(name);
+    return list;
+  };
+  json vocab = {
+      {"flags", names(BUILDER_FLAGS)},
+      {"memory_pool_limits", names(MEMORY_POOLS)},
+      {"default_device_type", names(DEVICE_TYPES)},
+      {"engine_capability", names(ENGINE_CAPABILITIES)},
+      {"hardware_compatibility_level", names(HW_COMPAT)},
+      {"profiling_verbosity", names(PROFILING_VERBOSITIES)},
+      {"runtime_platform", names(RUNTIME_PLATFORMS)},
+      {"tiling_optimization_level", names(TILING_LEVELS)},
+      {"tactic_sources", names(TACTIC_SOURCES)},
+      {"preview_features", names(PREVIEW_FEATURES)},
+  };
+#if NV_TENSORRT_MAJOR < 11
+  vocab["quantization_flags"] = json::array({"CALIBRATE_BEFORE_FUSION"});
+#else
+  vocab["quantization_flags"] = nullptr;  // gone in TensorRT 11
+#endif
+  return vocab;
+}

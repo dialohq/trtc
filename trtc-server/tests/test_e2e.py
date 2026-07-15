@@ -161,6 +161,24 @@ class ServerE2ETests(unittest.TestCase):
         post(tar_of({"trtc_build_spec.json": evil, "m.onnx": b"x"}), "traversal onnx name")
         post(tar_of({"../evil": b"x", "trtc_build_spec.json": spec, "m.onnx": b"x"}), "traversal tar member")
 
+    def test_openapi_contract_matches_routes(self):
+        request = urllib.request.Request(
+            f"{self.url}/openapi.json", headers={"Authorization": "Bearer secret"}
+        )
+        with urllib.request.urlopen(request) as response:
+            spec = json.loads(response.read())
+        self.assertEqual(spec["openapi"], "3.1.0")
+        self.assertEqual(
+            set(spec["paths"]),
+            {"/builds", "/builds/{id}", "/builds/{id}/artifacts", "/info", "/openapi.json"},
+        )
+        # The broker-only test binary carries no TensorRT, so the option enums
+        # are absent — but the option vocabulary itself is the contract.
+        config = spec["components"]["schemas"]["BuilderConfig"]
+        self.assertFalse(config["additionalProperties"])
+        self.assertIn("flags", config["properties"])
+        self.assertIn("memory_pool_limits", config["properties"])
+
     def test_unknown_job_is_404(self):
         request = urllib.request.Request(
             f"{self.url}/builds/eeeeeeeeeeee", headers={"Authorization": "Bearer secret"}

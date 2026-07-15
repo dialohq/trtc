@@ -43,3 +43,13 @@ Rent a GPU running the version matched to *your* project's lock:
 eval "$(nix run github:dialohq/trtc#launch-builder)"   # run from your project dir
 uv run trtc compile <entry> <weights> --builder "$TRTC_BUILDER"
 ```
+
+Or rent one *specific* vast.ai host by its machine id — the image is picked to
+match that machine's GPU architecture (slim `-sm<arch>` when the TensorRT line
+ships one, universal otherwise):
+
+```sh
+VAST_API_KEY=... nix run github:dialohq/trtc#setup-vastai -- <machine-id> [--disk GB] [--trt 10.16]
+```
+
+Logs go to stderr; stdout is just the created instance id.

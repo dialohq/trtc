@@ -285,6 +285,92 @@
               text = ''exec ${launch-env}/bin/trtc launch "$@"'';
             };
 
+            # Rents one specific vast.ai host — addressed by its stable machine
+            # id (offer ids churn; the machine id is what `vastai search
+            # offers` and the console call "machine_id") — and starts the
+            # builder image matching its GPU: the slim trt<V>-sm<arch> variant
+            # when that TensorRT ships one, the universal trt<V> otherwise.
+            # Logs go to stderr; stdout is just the instance id.
+            #   VAST_API_KEY=... nix run .#setup-vastai -- <machine-id> [--disk GB] [--trt 11.1]
+            setup-vastai = let
+              inherit (pkgs) lib;
+              defaultTrt = lib.last (builtins.sort (a: b: builtins.compareVersions a b < 0) (builtins.attrNames tensorrtPins));
+              archCases = lib.concatStringsSep "\n" (lib.mapAttrsToList (
+                  v: pin: ''                    "${v}") supported=" ${lib.concatStringsSep " " pin.archs} " ;;''
+                )
+                tensorrtPins);
+            in
+              pkgs.writeShellApplication {
+                name = "setup-vastai";
+                runtimeInputs = [vast-cli.packages.${system}.default pkgs.jq];
+                text = ''
+                  usage() {
+                    echo "usage: setup-vastai <machine-id> [--disk GB] [--trt VERSION] [--image IMAGE] [--registry REGISTRY]" >&2
+                    exit 2
+                  }
+                  machine="" image="" disk=40 trt=${defaultTrt} registry=ghcr.io/dialohq/trtc-builder
+                  while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                      --disk) disk=$2; shift 2 ;;
+                      --trt) trt=$2; shift 2 ;;
+                      --image) image=$2; shift 2 ;;
+                      --registry) registry=$2; shift 2 ;;
+                      -*) usage ;;
+                      *) [ -z "$machine" ] || usage; machine=$1; shift ;;
+                    esac
+                  done
+                  [ -n "$machine" ] || usage
+                  [ -n "''${VAST_API_KEY:-}" ] || { echo "setup-vastai: VAST_API_KEY is not set" >&2; exit 2; }
+                  log() { echo "[rent] $*" >&2; }
+
+                  case "$trt" in
+${archCases}
+                    *) echo "setup-vastai: no builder image for TensorRT $trt (have: ${lib.concatStringsSep ", " (builtins.attrNames tensorrtPins)})" >&2; exit 2 ;;
+                  esac
+
+                  # The smallest, then cheapest, rentable slice of this
+                  # machine: a builder needs exactly one GPU.
+                  offer="$(vastai search offers --api-key "$VAST_API_KEY" \
+                    "machine_id=$machine rentable=true verified=any" --raw \
+                    | jq 'sort_by([.num_gpus, .dph_total]) | .[0]')"
+                  if [ -z "$offer" ] || [ "$offer" = null ]; then
+                    echo "setup-vastai: no rentable offer on machine $machine" >&2
+                    exit 1
+                  fi
+                  offer_id="$(jq -r .id <<<"$offer")"
+                  gpu="$(jq -r .gpu_name <<<"$offer")"
+                  arch=$(( $(jq -r .compute_cap <<<"$offer") / 10 ))
+
+                  if [ -z "$image" ]; then
+                    case "$supported" in
+                      *" $arch "*) image="$registry:trt$trt-sm$arch" ;;
+                      *)
+                        image="$registry:trt$trt"
+                        log "TensorRT $trt has no slim sm$arch image; using the universal one"
+                        ;;
+                    esac
+                  fi
+                  log "machine $machine: $gpu (sm$arch), offer $offer_id at $(jq -r .dph_total <<<"$offer") \$/h"
+                  log "image: $image, disk: $disk GB"
+
+                  # Args-launch mode, like `trtc launch`: without --args vast
+                  # injects its own ssh/jupyter entrypoint and ignores the
+                  # image CMD, so the builder would never start.
+                  created="$(vastai create instance --api-key "$VAST_API_KEY" "$offer_id" \
+                    --image "$image" --disk "$disk" --env "-p 8080:8080" --cancel-unavail --raw \
+                    --entrypoint /bin/trtc-server --args serve --host 0.0.0.0 --port 8080)"
+                  instance="$(jq -r '.new_contract // empty' <<<"$created")"
+                  if [ -z "$instance" ]; then
+                    echo "setup-vastai: create failed: $created" >&2
+                    exit 1
+                  fi
+                  log "instance $instance created"
+                  log "status:  vastai show instance $instance --raw"
+                  log "destroy: vastai destroy instance $instance"
+                  echo "$instance"
+                '';
+              };
+
             # Pushes every pinned builder image — universal and single-arch —
             # each under three tags:
             #   trt10.13[-sm120]                          moving latest
